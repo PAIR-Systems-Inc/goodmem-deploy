@@ -32,6 +32,22 @@ Options:
 USAGE
 }
 
+random_name_prefix() {
+  local -a adjectives=(
+    bold bright cosmic dusk eager foggy funky gentle hidden icy
+    lucky mellow neon nimble quiet radiant salty subtle vivid
+    wavy wild zesty blursed
+  )
+  local -a nouns=(
+    hippo komodo lemon mango nebula otter panda quasar rocket
+    sailor sparrow sprout strawberry sunset tornado tulip urchin
+    valley zephyr
+  )
+  local adj="${adjectives[RANDOM % ${#adjectives[@]}]}"
+  local noun="${nouns[RANDOM % ${#nouns[@]}]}"
+  printf '%s-%s' "$adj" "$noun"
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --project-name)
@@ -77,6 +93,11 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [ -z "$PROJECT_NAME" ] && [ "$SKIP_INIT" = false ]; then
+  PROJECT_NAME="goodmem-$(random_name_prefix)"
+  echo "Using generated Railway project name: ${PROJECT_NAME}"
+fi
 
 ensure_cli() {
   if command -v railway >/dev/null 2>&1; then
