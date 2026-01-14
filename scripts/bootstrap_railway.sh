@@ -17,7 +17,7 @@ INSTALL_CLI=false
 
 usage() {
   cat <<'USAGE'
-Usage: ./bootstrap.sh [options]
+Usage: ./scripts/bootstrap_railway.sh [options]
 
 Options:
   --project-name NAME      Project name for railway init
@@ -294,23 +294,24 @@ if goodmem_cli_available; then
 
 GoodMem CLI (after TCP proxy exists):
 1) Initialize GoodMem (creates root user + master API key):
-   goodmem init --server https://<TCP_PROXY_DOMAIN>:<TCP_PROXY_PORT>
+   goodmem init --server https://<TCP_PROXY_DOMAIN>:<TCP_PROXY_PORT> --save-config=false
 2) Export the API key for future calls:
    export GOODMEM_API_KEY="<API_KEY_FROM_INIT>"
 3) Example command:
    goodmem --server https://<TCP_PROXY_DOMAIN>:<TCP_PROXY_PORT> user list
 
 Notes:
-- REST TLS is disabled, gRPC TLS stays enabled by default. Use https:// (or no scheme) for gRPC.
+- REST TLS is terminated by Railway; GoodMem REST runs plaintext behind it. gRPC TLS stays enabled by default.
+- Use https:// (or no scheme) for gRPC unless you explicitly disable it.
 - To force plaintext gRPC, set GOODMEM_GRPC_TLS_ENABLED=false or GOODMEM_TLS_DISABLED=true and use http://.
-- goodmem init saves config to ~/.goodmem/config.json by default; use --save-config=false to skip.
+- goodmem init saves config to ~/.goodmem/config.json by default; --save-config=false avoids overwriting existing config.
 EOF_MSG
 else
   cat <<'EOF_MSG'
 
 GoodMem CLI (after TCP proxy exists):
 - goodmem CLI not found in PATH. Install it, then run:
-  goodmem init --server https://<TCP_PROXY_DOMAIN>:<TCP_PROXY_PORT>
+  goodmem init --server https://<TCP_PROXY_DOMAIN>:<TCP_PROXY_PORT> --save-config=false
 - This first call creates the root user and master API key.
 EOF_MSG
 fi
