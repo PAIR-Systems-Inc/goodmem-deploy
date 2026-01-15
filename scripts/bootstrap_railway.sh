@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+trap 'echo "Error: command failed at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 PROJECT_NAME=""
 WORKSPACE=""
@@ -14,6 +15,9 @@ GRPC_PORT=50051
 SKIP_INIT=false
 SKIP_DOMAIN=false
 INSTALL_CLI=false
+WAIT_FOR_READY=true
+READY_WAIT_TIMEOUT=120
+READY_WAIT_INTERVAL=5
 
 usage() {
   cat <<'USAGE'
@@ -23,11 +27,16 @@ Options:
   --project-name NAME      Project name for railway init
   --workspace NAME|ID      Workspace name or ID for railway init
   --postgres-service NAME  Postgres service name (default: postgres)
+  --postgres-image IMAGE   Postgres image (default: pgvector/pgvector:pg17)
+  --postgres-user NAME     Postgres user (default: postgres)
+  --postgres-db NAME       Postgres database (default: goodmem)
   --goodmem-service NAME   GoodMem service name (default: goodmem)
   --image IMAGE            GoodMem image (default: ghcr.io/pair-systems-inc/goodmem/server:latest)
   --install-cli            Install Railway CLI if missing
   --skip-init              Skip railway init (use if repo already linked)
   --skip-domain            Skip domain creation
+  --no-wait                Skip waiting for readiness (/startupz)
+  --wait-timeout SECONDS   Readiness wait timeout (default: 120)
   -h, --help               Show this help
 USAGE
 }
@@ -62,6 +71,18 @@ while [[ $# -gt 0 ]]; do
       POSTGRES_SERVICE="$2"
       shift 2
       ;;
+    --postgres-image)
+      POSTGRES_IMAGE="$2"
+      shift 2
+      ;;
+    --postgres-user)
+      POSTGRES_USER="$2"
+      shift 2
+      ;;
+    --postgres-db)
+      POSTGRES_DB="$2"
+      shift 2
+      ;;
     --goodmem-service)
       GOODMEM_SERVICE="$2"
       shift 2
@@ -82,6 +103,14 @@ while [[ $# -gt 0 ]]; do
       SKIP_DOMAIN=true
       shift
       ;;
+    --no-wait)
+      WAIT_FOR_READY=false
+      shift
+      ;;
+    --wait-timeout)
+      READY_WAIT_TIMEOUT="$2"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -98,6 +127,23 @@ if [ -z "$PROJECT_NAME" ] && [ "$SKIP_INIT" = false ]; then
   PROJECT_NAME="goodmem-$(random_name_prefix)"
   echo "Using generated Railway project name: ${PROJECT_NAME}"
 fi
+
+retry() {
+  local attempts="$1"
+  local delay="$2"
+  shift 2
+  local attempt=1
+  while true; do
+    if "$@"; then
+      return 0
+    fi
+    if [ "$attempt" -ge "$attempts" ]; then
+      return 1
+    fi
+    attempt=$((attempt + 1))
+    sleep "$delay"
+  done
+}
 
 ensure_cli() {
   if command -v railway >/dev/null 2>&1; then
@@ -163,6 +209,14 @@ service_exists() {
   railway variables --service "$service" --json >/dev/null 2>&1
 }
 
+wait_for_service() {
+  local service="$1"
+  if retry 5 2 service_exists "$service"; then
+    return 0
+  fi
+  return 1
+}
+
 goodmem_cli_available() {
   command -v goodmem >/dev/null 2>&1
 }
@@ -195,7 +249,7 @@ ensure_postgres_service() {
     --variables "POSTGRES_PASSWORD=${postgres_password}" \
     --variables "POSTGRES_DB=${POSTGRES_DB}"
 
-  if ! service_exists "$POSTGRES_SERVICE"; then
+  if ! wait_for_service "$POSTGRES_SERVICE"; then
     echo "Postgres service \"$POSTGRES_SERVICE\" not found after creation." >&2
     echo "If your Postgres service uses a different name, re-run with --postgres-service." >&2
     exit 1
@@ -241,6 +295,39 @@ extract_domain() {
   printf '%s' "$domain"
 }
 
+wait_for_ready() {
+  if [ "$WAIT_FOR_READY" = false ]; then
+    return
+  fi
+  if [ -z "$rest_domain" ]; then
+    return
+  fi
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "curl not found; skipping readiness wait."
+    return
+  fi
+
+  local url="https://${rest_domain}/startupz"
+  local deadline=$((SECONDS + READY_WAIT_TIMEOUT))
+
+  echo "Waiting for GoodMem readiness (this can take a minute on first boot)..."
+  while (( SECONDS < deadline )); do
+    local body=""
+    body="$(curl -fsSL --max-time 5 "$url" 2>/dev/null || true)"
+    if printf '%s' "$body" | grep -q '"state":"READY"'; then
+      echo "GoodMem reported READY via /startupz."
+      return
+    fi
+    if printf '%s' "$body" | grep -q '"started":true'; then
+      echo "GoodMem reported started via /startupz."
+      return
+    fi
+    sleep "$READY_WAIT_INTERVAL"
+  done
+
+  echo "Warning: readiness did not respond within ${READY_WAIT_TIMEOUT}s. It may still be starting."
+}
+
 if [ "$SKIP_INIT" = false ]; then
   init_args=()
   if [ -n "$PROJECT_NAME" ]; then
@@ -284,6 +371,12 @@ if [ -n "$rest_domain" ]; then
 fi
 
 grpc_line="TCP proxy required (see steps below)"
+health_line="not available (requires a domain)"
+if [ -n "$rest_domain" ]; then
+  health_line="https://${rest_domain}/startupz"
+fi
+
+wait_for_ready
 
 cat <<EOF_MSG
 Bootstrap complete.
@@ -291,6 +384,7 @@ Bootstrap complete.
 Endpoints:
 - REST: $rest_line
 - gRPC (HTTP/2): $grpc_line
+- Health: $health_line
 - Public IP: Railway does not provide a fixed public IP for services; use the domain(s).
 
 Next steps:
