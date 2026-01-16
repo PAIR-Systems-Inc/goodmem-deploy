@@ -227,6 +227,134 @@ ensure_login() {
   fi
 }
 
+ensure_org() {
+  if [ -n "$ORG" ]; then
+    return
+  fi
+  if [ -n "${FLY_ORG:-}" ]; then
+    ORG="$FLY_ORG"
+    echo "Using Fly org from FLY_ORG: \"$ORG\"."
+    return
+  fi
+  if [ -n "${FLY_ORG_SLUG:-}" ]; then
+    ORG="$FLY_ORG_SLUG"
+    echo "Using Fly org from FLY_ORG_SLUG: \"$ORG\"."
+    return
+  fi
+
+  local orgs_json=""
+  if ! orgs_json="$("$FLYCTL_BIN" orgs list --json 2>/dev/null)"; then
+    return
+  fi
+  if [ -z "$orgs_json" ]; then
+    return
+  fi
+
+  local -a org_lines=()
+  if command -v python3 >/dev/null 2>&1; then
+    mapfile -t org_lines < <(printf '%s' "$orgs_json" | python3 - <<'PY'
+import json
+import sys
+
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+
+for org in data:
+    slug = org.get("slug", "")
+    name = org.get("name", "")
+    org_type = org.get("type", "")
+    if slug:
+        print(f"{slug}\t{name}\t{org_type}")
+PY
+)
+  else
+    mapfile -t org_lines < <(printf '%s' "$orgs_json" | grep -o '"slug":"[^"]*"' | sed 's/"slug":"//;s/"$//')
+  fi
+
+  if [ "${#org_lines[@]}" -eq 0 ]; then
+    return
+  fi
+
+  local -a org_slugs=()
+  local -a org_labels=()
+  local line=""
+  local slug=""
+  local name=""
+  local org_type=""
+  local label=""
+
+  for line in "${org_lines[@]}"; do
+    slug=""
+    name=""
+    org_type=""
+    label=""
+    IFS=$'\t' read -r slug name org_type <<< "$line"
+    if [ -z "$slug" ]; then
+      slug="$line"
+    fi
+    if [ -z "$slug" ]; then
+      continue
+    fi
+    label="$slug"
+    if [ -n "$name" ] && [ "$name" != "$slug" ]; then
+      label="${label} (${name})"
+    fi
+    if [ -n "$org_type" ]; then
+      label="${label} [${org_type}]"
+    fi
+    org_slugs+=("$slug")
+    org_labels+=("$label")
+  done
+
+  if [ "${#org_slugs[@]}" -eq 1 ]; then
+    ORG="${org_slugs[0]}"
+    echo "Using only available Fly org \"$ORG\"."
+    return
+  fi
+
+  if [ -t 0 ]; then
+    echo "Multiple Fly orgs detected. Select one for app creation:"
+    local i=0
+    for label in "${org_labels[@]}"; do
+      i=$((i + 1))
+      echo "  ${i}) ${label}"
+    done
+
+    local choice=""
+    while true; do
+      read -r -p "Enter selection (1-${#org_slugs[@]}) or slug: " choice
+      if [[ "$choice" =~ ^[0-9]+$ ]]; then
+        if (( choice >= 1 && choice <= ${#org_slugs[@]} )); then
+          ORG="${org_slugs[choice - 1]}"
+          break
+        fi
+      else
+        local matched="0"
+        for slug in "${org_slugs[@]}"; do
+          if [ "$choice" = "$slug" ]; then
+            ORG="$slug"
+            matched="1"
+            break
+          fi
+        done
+        if [ "$matched" = "1" ]; then
+          break
+        fi
+      fi
+      echo "Invalid selection."
+    done
+
+    echo "Using Fly org \"$ORG\"."
+    return
+  fi
+
+  echo "Multiple Fly orgs detected but no --org was provided." >&2
+  echo "Re-run with --org <slug> or set FLY_ORG." >&2
+  exit 1
+}
+
 app_exists() {
   local app="$1"
   "$FLYCTL_BIN" status --app "$app" >/dev/null 2>&1
@@ -520,6 +648,7 @@ trap cleanup EXIT
 
 ensure_cli
 ensure_login
+ensure_org
 ensure_app_names
 ensure_postgres_app
 ensure_goodmem_app
