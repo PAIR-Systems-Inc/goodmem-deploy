@@ -145,6 +145,20 @@ retry() {
   done
 }
 
+tty_available() {
+  [ -t 0 ] || [ -r /dev/tty ]
+}
+
+run_with_tty() {
+  if [ -t 0 ]; then
+    "$@"
+  elif [ -r /dev/tty ]; then
+    "$@" </dev/tty
+  else
+    "$@"
+  fi
+}
+
 ensure_cli() {
   if command -v railway >/dev/null 2>&1; then
     return
@@ -187,8 +201,8 @@ ensure_login() {
     return
   fi
 
-  if [ -t 0 ]; then
-    railway login
+  if tty_available; then
+    run_with_tty railway login
   else
     echo "Not logged in to Railway and no TTY available." >&2
     echo "Run 'railway login' interactively or set RAILWAY_API_TOKEN." >&2
@@ -336,7 +350,7 @@ if [ "$SKIP_INIT" = false ]; then
   if [ -n "$WORKSPACE" ]; then
     init_args+=(--workspace "$WORKSPACE")
   fi
-  railway init "${init_args[@]}"
+  run_with_tty railway init "${init_args[@]}"
 fi
 
 ensure_postgres_service
