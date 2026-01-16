@@ -699,14 +699,6 @@ Endpoints:
 - gRPC (HTTP/2): ${grpc_domain} (TLS terminated by Fly, h2c to app)
 - Postgres (internal): ${postgres_internal}
 - Health: ${health_endpoint}
-
-Next steps:
-- pgvector is bundled in the Postgres image and GoodMem will create the extension.
-  If you want to verify manually, run:
-  flyctl proxy 5432 -a ${POSTGRES_APP}
-  then in psql: CREATE EXTENSION IF NOT EXISTS vector;
-- If the GoodMem service did not auto-deploy, run:
-  flyctl deploy -a ${GOODMEM_APP}
 EOF_MSG
 
 if goodmem_cli_available; then
@@ -721,9 +713,7 @@ GoodMem CLI (after gRPC is reachable):
    goodmem --server https://${GOODMEM_APP}.fly.dev:${GRPC_PORT} user list
 
 Notes:
-- REST TLS is terminated by Fly; GoodMem REST runs plaintext behind it. gRPC uses h2c behind Fly TLS termination.
 - Use https:// for gRPC when connecting via the Fly domain.
-- For direct internal access, use http:// and keep GOODMEM_GRPC_TLS_ENABLED=false.
 - goodmem init saves config to ~/.goodmem/config.json by default; --save-config=false avoids overwriting existing config.
 EOF_MSG
 else
