@@ -126,6 +126,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 FLYCTL_BIN="${FLYCTL_BIN:-flyctl}"
+JQ_BIN="jq"
 
 random_name_prefix() {
   local -a adjectives=(
@@ -175,6 +176,39 @@ resolve_flyctl() {
     FLYCTL_BIN="$HOME/.fly/bin/flyctl"
     return
   fi
+}
+
+ensure_jq() {
+  if command -v "$JQ_BIN" >/dev/null 2>&1; then
+    return
+  fi
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "jq not found and curl is unavailable to download it." >&2
+    exit 1
+  fi
+
+  local os
+  local arch
+  os="$(uname -s 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+  arch="$(uname -m 2>/dev/null)"
+
+  case "$os" in
+    linux) ;;
+    darwin) os="osx" ;;
+    *) echo "Unsupported OS for jq install: ${os:-unknown}" >&2; exit 1 ;;
+  esac
+
+  case "$arch" in
+    x86_64|amd64) arch="amd64" ;;
+    aarch64|arm64) arch="arm64" ;;
+    *) echo "Unsupported architecture for jq install: ${arch:-unknown}" >&2; exit 1 ;;
+  esac
+
+  local jq_url="https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-${os}-${arch}"
+  JQ_BIN="$(mktemp -t goodmem-jq-XXXXXX)"
+  echo "Downloading jq (${os}/${arch})..."
+  curl -fsSL "$jq_url" -o "$JQ_BIN"
+  chmod +x "$JQ_BIN"
 }
 
 ensure_cli() {
@@ -257,59 +291,17 @@ ensure_org() {
     return
   fi
 
-  local orgs_json=""
-  if ! orgs_json="$("$FLYCTL_BIN" orgs list --json 2>/dev/null)"; then
-    prompt_org_slug
-    return
-  fi
-  if [ -z "$orgs_json" ]; then
-    prompt_org_slug
-    return
-  fi
-
   local -a org_lines=()
-  if command -v python3 >/dev/null 2>&1; then
-    mapfile -t org_lines < <(printf '%s' "$orgs_json" | python3 - <<'PY'
-import json
-import sys
-
-try:
-    data = json.load(sys.stdin)
-except Exception:
-    sys.exit(0)
-
-def emit(slug, name="", org_type=""):
-    if not slug:
-        return
-    slug = str(slug)
-    name = "" if name is None else str(name)
-    org_type = "" if org_type is None else str(org_type)
-    print(f"{slug}\t{name}\t{org_type}")
-
-if isinstance(data, dict):
-    if all(isinstance(v, (str, type(None))) for v in data.values()):
-        for slug, name in data.items():
-            emit(slug, name, "")
-    elif isinstance(data.get("organizations"), list):
-        for org in data["organizations"]:
-            if isinstance(org, dict):
-                emit(org.get("slug", ""), org.get("name", ""), org.get("type", ""))
-    elif any(k in data for k in ("slug", "name", "type")):
-        emit(data.get("slug", ""), data.get("name", ""), data.get("type", ""))
-elif isinstance(data, list):
-    for org in data:
-        if isinstance(org, dict):
-            emit(org.get("slug", ""), org.get("name", ""), org.get("type", ""))
-PY
-)
-  else
-    mapfile -t org_lines < <(
-      printf '%s' "$orgs_json" | sed -n 's/^[[:space:]]*"\([^"]\+\)"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1\t\2/p'
-    )
-    if [ "${#org_lines[@]}" -eq 0 ]; then
-      mapfile -t org_lines < <(printf '%s' "$orgs_json" | grep -o '"slug":"[^"]*"' | sed 's/"slug":"//;s/"$//')
-    fi
+  local orgs_parsed=""
+  if ! orgs_parsed="$("$FLYCTL_BIN" orgs list --json 2>/dev/null | "$JQ_BIN" -r 'def emit(s;n;t): if s==null then empty else "\(s)\t\((n//"")|tostring)\t\((t//"")|tostring)" end; if type=="array" then .[]|select(type=="object")|emit(.slug;.name;.type) elif type=="object" then if (to_entries|all(.value|type=="string" or type=="null")) then to_entries[]|emit(.key;.value;null) elif has("slug") then emit(.slug;.name;.type) else empty end else empty end' 2>/dev/null)"; then
+    prompt_org_slug
+    return
   fi
+  if [ -z "$orgs_parsed" ]; then
+    prompt_org_slug
+    return
+  fi
+  mapfile -t org_lines <<< "$orgs_parsed"
 
   if [ "${#org_lines[@]}" -eq 0 ]; then
     prompt_org_slug
@@ -687,6 +679,7 @@ trap cleanup EXIT
 
 ensure_cli
 ensure_login
+ensure_jq
 ensure_org
 ensure_app_names
 ensure_postgres_app
