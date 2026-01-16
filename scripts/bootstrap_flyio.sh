@@ -278,16 +278,37 @@ try:
 except Exception:
     sys.exit(0)
 
-for org in data:
-    slug = org.get("slug", "")
-    name = org.get("name", "")
-    org_type = org.get("type", "")
-    if slug:
-        print(f"{slug}\t{name}\t{org_type}")
+def emit(slug, name="", org_type=""):
+    if not slug:
+        return
+    slug = str(slug)
+    name = "" if name is None else str(name)
+    org_type = "" if org_type is None else str(org_type)
+    print(f"{slug}\t{name}\t{org_type}")
+
+if isinstance(data, dict):
+    if all(isinstance(v, (str, type(None))) for v in data.values()):
+        for slug, name in data.items():
+            emit(slug, name, "")
+    elif isinstance(data.get("organizations"), list):
+        for org in data["organizations"]:
+            if isinstance(org, dict):
+                emit(org.get("slug", ""), org.get("name", ""), org.get("type", ""))
+    elif any(k in data for k in ("slug", "name", "type")):
+        emit(data.get("slug", ""), data.get("name", ""), data.get("type", ""))
+elif isinstance(data, list):
+    for org in data:
+        if isinstance(org, dict):
+            emit(org.get("slug", ""), org.get("name", ""), org.get("type", ""))
 PY
 )
   else
-    mapfile -t org_lines < <(printf '%s' "$orgs_json" | grep -o '"slug":"[^"]*"' | sed 's/"slug":"//;s/"$//')
+    mapfile -t org_lines < <(
+      printf '%s' "$orgs_json" | sed -n 's/^[[:space:]]*"\([^"]\+\)"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1\t\2/p'
+    )
+    if [ "${#org_lines[@]}" -eq 0 ]; then
+      mapfile -t org_lines < <(printf '%s' "$orgs_json" | grep -o '"slug":"[^"]*"' | sed 's/"slug":"//;s/"$//')
+    fi
   fi
 
   if [ "${#org_lines[@]}" -eq 0 ]; then
