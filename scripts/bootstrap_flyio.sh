@@ -126,7 +126,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 FLYCTL_BIN="${FLYCTL_BIN:-flyctl}"
-JQ_BIN="jq"
+JQ_BIN="${JQ_BIN:-jq}"
 
 random_name_prefix() {
   local -a adjectives=(
@@ -262,16 +262,21 @@ ensure_login() {
 }
 
 prompt_org_slug() {
-  if [ ! -t 0 ]; then
+  local choice=""
+  local prompt="Enter Fly org slug to use for app creation: "
+  if [ -t 0 ]; then
+    while [ -z "$choice" ]; do
+      read -r -p "$prompt" choice
+    done
+  elif [ -r /dev/tty ]; then
+    while [ -z "$choice" ]; do
+      read -r -p "$prompt" choice </dev/tty
+    done
+  else
     echo "Fly org must be specified when not running interactively." >&2
     echo "Re-run with --org <slug> or set FLY_ORG." >&2
     exit 1
   fi
-
-  local choice=""
-  while [ -z "$choice" ]; do
-    read -r -p "Enter Fly org slug to use for app creation: " choice
-  done
   ORG="$choice"
   echo "Using Fly org \"$ORG\"."
 }
@@ -345,45 +350,54 @@ ensure_org() {
     return
   fi
 
+  local tty_input=""
   if [ -t 0 ]; then
-    echo "Multiple Fly orgs detected. Select one for app creation:"
-    local i=0
-    for label in "${org_labels[@]}"; do
-      i=$((i + 1))
-      echo "  ${i}) ${label}"
-    done
-
-    local choice=""
-    while true; do
-      read -r -p "Enter selection (1-${#org_slugs[@]}) or slug: " choice
-      if [[ "$choice" =~ ^[0-9]+$ ]]; then
-        if (( choice >= 1 && choice <= ${#org_slugs[@]} )); then
-          ORG="${org_slugs[choice - 1]}"
-          break
-        fi
-      else
-        local matched="0"
-        for slug in "${org_slugs[@]}"; do
-          if [ "$choice" = "$slug" ]; then
-            ORG="$slug"
-            matched="1"
-            break
-          fi
-        done
-        if [ "$matched" = "1" ]; then
-          break
-        fi
-      fi
-      echo "Invalid selection."
-    done
-
-    echo "Using Fly org \"$ORG\"."
-    return
+    tty_input=""
+  elif [ -r /dev/tty ]; then
+    tty_input="/dev/tty"
+  else
+    echo "Multiple Fly orgs detected but no --org was provided." >&2
+    echo "Re-run with --org <slug> or set FLY_ORG." >&2
+    exit 1
   fi
 
-  echo "Multiple Fly orgs detected but no --org was provided." >&2
-  echo "Re-run with --org <slug> or set FLY_ORG." >&2
-  exit 1
+  echo "Multiple Fly orgs detected. Select one for app creation:"
+  local i=0
+  for label in "${org_labels[@]}"; do
+    i=$((i + 1))
+    echo "  ${i}) ${label}"
+  done
+
+  local choice=""
+  while true; do
+    if [ -n "$tty_input" ]; then
+      read -r -p "Enter selection (1-${#org_slugs[@]}) or slug: " choice <"$tty_input"
+    else
+      read -r -p "Enter selection (1-${#org_slugs[@]}) or slug: " choice
+    fi
+    if [[ "$choice" =~ ^[0-9]+$ ]]; then
+      if (( choice >= 1 && choice <= ${#org_slugs[@]} )); then
+        ORG="${org_slugs[choice - 1]}"
+        break
+      fi
+    else
+      local matched="0"
+      for slug in "${org_slugs[@]}"; do
+        if [ "$choice" = "$slug" ]; then
+          ORG="$slug"
+          matched="1"
+          break
+        fi
+      done
+      if [ "$matched" = "1" ]; then
+        break
+      fi
+    fi
+    echo "Invalid selection."
+  done
+
+  echo "Using Fly org \"$ORG\"."
+  return
 }
 
 app_exists() {
