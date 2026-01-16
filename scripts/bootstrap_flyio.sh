@@ -227,6 +227,21 @@ ensure_login() {
   fi
 }
 
+prompt_org_slug() {
+  if [ ! -t 0 ]; then
+    echo "Fly org must be specified when not running interactively." >&2
+    echo "Re-run with --org <slug> or set FLY_ORG." >&2
+    exit 1
+  fi
+
+  local choice=""
+  while [ -z "$choice" ]; do
+    read -r -p "Enter Fly org slug to use for app creation: " choice
+  done
+  ORG="$choice"
+  echo "Using Fly org \"$ORG\"."
+}
+
 ensure_org() {
   if [ -n "$ORG" ]; then
     return
@@ -244,9 +259,11 @@ ensure_org() {
 
   local orgs_json=""
   if ! orgs_json="$("$FLYCTL_BIN" orgs list --json 2>/dev/null)"; then
+    prompt_org_slug
     return
   fi
   if [ -z "$orgs_json" ]; then
+    prompt_org_slug
     return
   fi
 
@@ -274,6 +291,7 @@ PY
   fi
 
   if [ "${#org_lines[@]}" -eq 0 ]; then
+    prompt_org_slug
     return
   fi
 
