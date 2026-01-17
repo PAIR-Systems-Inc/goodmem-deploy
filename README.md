@@ -47,6 +47,13 @@ GoodMem service variables (use reference variables for Postgres):
 
 Notes:
 - If you name the Postgres service differently, update the `postgres.` prefix.
+- The script attaches a Railway volume to the Postgres service at `/var/lib/postgresql/data`
+  and sets `PGDATA=/var/lib/postgresql/data/pgdata` so Postgres uses the volume.
+  If the Postgres service already exists, re-run with `--attach-existing-postgres-volume`
+  to attach a volume (this can hide existing data).
+- Railway defaults to your plan's per-service limits (Free 0.5 GB RAM, Trial 1 GB, Hobby 8 GB, Pro 32 GB, Enterprise 48 GB).
+  For parity with Fly's 1 GB defaults, set GoodMem and Postgres memory limits to 1 GB in
+  the Railway UI (Service -> Settings -> Deploy -> Resource Limits).
 - GoodMem defaults to REST on 8080 and gRPC on 9090. This script sets
   `GOODMEM_GRPC_PORT=50051` to use the standard gRPC port. Railway provides a
   single Railway-provided domain per service, so use it for REST and expose

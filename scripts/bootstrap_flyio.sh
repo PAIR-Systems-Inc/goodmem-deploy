@@ -13,6 +13,7 @@ POSTGRES_DB="goodmem"
 POSTGRES_PASSWORD=""
 POSTGRES_VOLUME="pg_data"
 POSTGRES_VOLUME_SIZE=10
+POSTGRES_MEMORY_MB=1024
 POSTGRES_DATA_DIR="/var/lib/postgresql/data/pgdata"
 GOODMEM_MEMORY_MB=1024
 GOODMEM_GRPC_TLS_ENABLED=false
@@ -52,6 +53,7 @@ Options:
   --postgres-password PASS  Postgres password (generated if not set)
   --postgres-volume NAME    Postgres volume name (default: pg_data)
   --postgres-volume-size GB Postgres volume size in GB (default: 10)
+  --postgres-memory MB      Postgres VM memory in MB (default: 1024)
   --goodmem-memory MB       GoodMem VM memory in MB (default: 1024)
   --no-wait                 Skip waiting for readiness (/startupz or gRPC)
   --wait-timeout SECONDS    Readiness wait timeout (default: 120)
@@ -100,6 +102,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --postgres-volume-size)
       POSTGRES_VOLUME_SIZE="$2"
+      shift 2
+      ;;
+    --postgres-memory)
+      POSTGRES_MEMORY_MB="$2"
       shift 2
       ;;
     --goodmem-memory)
@@ -653,7 +659,8 @@ primary_region = "$REGION"
     soft_limit = 40
 EOF
 
-  "$FLYCTL_BIN" deploy --app "$POSTGRES_APP" --config "$postgres_config" --now
+  "$FLYCTL_BIN" deploy --app "$POSTGRES_APP" --config "$postgres_config" --now \
+    --vm-memory "$POSTGRES_MEMORY_MB"
 }
 
 ensure_goodmem_app() {

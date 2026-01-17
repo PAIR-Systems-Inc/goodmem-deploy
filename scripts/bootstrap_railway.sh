@@ -10,6 +10,10 @@ IMAGE="ghcr.io/pair-systems-inc/goodmem/server:latest"
 POSTGRES_IMAGE="pgvector/pgvector:pg17"
 POSTGRES_USER="postgres"
 POSTGRES_DB="goodmem"
+POSTGRES_MEMORY_MB=1024
+GOODMEM_MEMORY_MB=1024
+POSTGRES_VOLUME_MOUNT="/var/lib/postgresql/data"
+POSTGRES_DATA_DIR="/var/lib/postgresql/data/pgdata"
 REST_PORT=8080
 GRPC_PORT=50051
 SKIP_INIT=false
@@ -18,6 +22,7 @@ INSTALL_CLI=false
 WAIT_FOR_READY=true
 READY_WAIT_TIMEOUT=120
 READY_WAIT_INTERVAL=5
+ATTACH_EXISTING_POSTGRES_VOLUME=false
 ROOT_API_KEY=""
 ROOT_USER_ID=""
 INIT_ALREADY=""
@@ -43,8 +48,13 @@ Options:
   --postgres-image IMAGE   Postgres image (default: pgvector/pgvector:pg17)
   --postgres-user NAME     Postgres user (default: postgres)
   --postgres-db NAME       Postgres database (default: goodmem)
+  --postgres-memory MB     Postgres memory limit in MB (default: 1024)
   --goodmem-service NAME   GoodMem service name (default: goodmem)
   --image IMAGE            GoodMem image (default: ghcr.io/pair-systems-inc/goodmem/server:latest)
+  --goodmem-memory MB      GoodMem memory limit in MB (default: 1024)
+  --attach-existing-postgres-volume
+                           Attach a volume even if the Postgres service exists
+                           (may hide existing data)
   --install-cli            Install Railway CLI if missing
   --skip-init              Skip railway init (use if repo already linked)
   --skip-domain            Skip domain creation
@@ -96,6 +106,10 @@ while [[ $# -gt 0 ]]; do
       POSTGRES_DB="$2"
       shift 2
       ;;
+    --postgres-memory)
+      POSTGRES_MEMORY_MB="$2"
+      shift 2
+      ;;
     --goodmem-service)
       GOODMEM_SERVICE="$2"
       shift 2
@@ -103,6 +117,14 @@ while [[ $# -gt 0 ]]; do
     --image)
       IMAGE="$2"
       shift 2
+      ;;
+    --goodmem-memory)
+      GOODMEM_MEMORY_MB="$2"
+      shift 2
+      ;;
+    --attach-existing-postgres-volume)
+      ATTACH_EXISTING_POSTGRES_VOLUME=true
+      shift
       ;;
     --install-cli)
       INSTALL_CLI=true
@@ -244,6 +266,219 @@ wait_for_service() {
   return 1
 }
 
+find_service_id() {
+  local name="$1"
+  if command -v jq >/dev/null 2>&1; then
+    jq -r --arg name "$name" \
+      '.. | objects | select(.name? == $name and (.id? != null)) | .id' \
+      | head -n1
+    return
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$name" <<'PY'
+import json
+import sys
+
+name = sys.argv[1]
+
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+
+def walk(node):
+    if isinstance(node, dict):
+        if node.get("name") == name and node.get("id"):
+            return node["id"]
+        for value in node.values():
+            found = walk(value)
+            if found:
+                return found
+    elif isinstance(node, list):
+        for item in node:
+            found = walk(item)
+            if found:
+                return found
+    return None
+
+result = walk(data)
+if result:
+    sys.stdout.write(str(result))
+PY
+    return
+  fi
+  return 1
+}
+
+postgres_service_id() {
+  local status_json=""
+  local service_id=""
+
+  if status_json="$(railway status --json 2>/dev/null)"; then
+    service_id="$(printf '%s' "$status_json" | find_service_id "$POSTGRES_SERVICE")"
+    if [ -n "$service_id" ]; then
+      printf '%s' "$service_id"
+      return 0
+    fi
+  fi
+
+  if status_json="$(railway service status --json --all 2>/dev/null)"; then
+    service_id="$(printf '%s' "$status_json" | find_service_id "$POSTGRES_SERVICE")"
+    if [ -n "$service_id" ]; then
+      printf '%s' "$service_id"
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+volume_list_nonempty() {
+  local json="$1"
+  if command -v jq >/dev/null 2>&1; then
+    printf '%s' "$json" | jq -e 'type == "array" and length > 0' >/dev/null 2>&1
+    return
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    printf '%s' "$json" | python3 - <<'PY'
+import json
+import sys
+
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+
+if isinstance(data, list) and data:
+    sys.exit(0)
+sys.exit(1)
+PY
+    return
+  fi
+  printf '%s' "$json" | grep -q "{"
+}
+
+postgres_volume_attached() {
+  local volumes_json=""
+  local service_id=""
+  service_id="$(postgres_service_id 2>/dev/null || true)"
+  if [ -n "$service_id" ] && volumes_json="$(railway volume --service "$service_id" list --json 2>/dev/null)"; then
+    if volume_list_nonempty "$volumes_json"; then
+      return 0
+    fi
+    return 1
+  fi
+
+  if volumes_json="$(railway volume list --json 2>/dev/null)"; then
+    if command -v jq >/dev/null 2>&1; then
+      printf '%s' "$volumes_json" | jq -e \
+        --arg service "$POSTGRES_SERVICE" \
+        --arg serviceId "$service_id" \
+        --arg mount "$POSTGRES_VOLUME_MOUNT" \
+        'map(select((.serviceName? == $service) or (.serviceId? == $serviceId) or (.serviceId? == $service) or (.service? == $service) or (.mountPath? == $mount) or (.mount_path? == $mount))) | length > 0' \
+        >/dev/null 2>&1
+      return
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+      printf '%s' "$volumes_json" | python3 - "$POSTGRES_SERVICE" "$service_id" "$POSTGRES_VOLUME_MOUNT" <<'PY'
+import json
+import sys
+
+service = sys.argv[1]
+service_id = sys.argv[2]
+mount = sys.argv[3]
+
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+
+if not isinstance(data, list):
+    sys.exit(1)
+
+def matches(item):
+    if not isinstance(item, dict):
+        return False
+    if mount and str(item.get("mountPath", "")) == mount:
+        return True
+    if mount and str(item.get("mount_path", "")) == mount:
+        return True
+    for key in ("service", "serviceId", "serviceID", "serviceName", "service_name", "service_id"):
+        value = item.get(key)
+        if value is not None and str(value) == service:
+            return True
+        if service_id and value is not None and str(value) == service_id:
+            return True
+    return False
+
+if any(matches(item) for item in data):
+    sys.exit(0)
+sys.exit(1)
+PY
+      return
+    fi
+    printf '%s' "$volumes_json" | grep -q "$POSTGRES_VOLUME_MOUNT"
+    return
+  fi
+
+  return 1
+}
+
+ensure_postgres_volume() {
+  local created="$1"
+  if postgres_volume_attached; then
+    return
+  fi
+
+  if [ "$created" = true ] || [ "$ATTACH_EXISTING_POSTGRES_VOLUME" = true ]; then
+    echo "Attaching volume to Postgres service \"$POSTGRES_SERVICE\"..."
+    local service_id=""
+    local volume_output=""
+    local -a volume_cmd=()
+    service_id="$(postgres_service_id 2>/dev/null || true)"
+    if [ -n "$service_id" ]; then
+      volume_cmd=(railway volume --service "$service_id" add --mount-path "$POSTGRES_VOLUME_MOUNT")
+    elif tty_available; then
+      volume_cmd=(railway volume add --mount-path "$POSTGRES_VOLUME_MOUNT")
+    else
+      cat <<EOF_WARN
+Warning: Unable to resolve Railway service ID for "$POSTGRES_SERVICE" and no TTY is available.
+Attach a volume manually:
+  railway volume --service "$POSTGRES_SERVICE" add --mount-path "$POSTGRES_VOLUME_MOUNT"
+  railway variables --service "$POSTGRES_SERVICE" --set "PGDATA=${POSTGRES_DATA_DIR}"
+EOF_WARN
+      return
+    fi
+
+    if ! volume_output="$("${volume_cmd[@]}" 2>&1)"; then
+      if printf '%s' "$volume_output" | grep -qiE 'already|exists|has a volume'; then
+        echo "Postgres volume already attached; continuing."
+        return
+      fi
+      if printf '%s' "$volume_output" | grep -qiE 'panicked|unwrap'; then
+        cat <<EOF_WARN
+Railway CLI crashed while attaching the volume. Upgrade the CLI and rerun:
+  railway upgrade
+  railway volume --service "$POSTGRES_SERVICE" add --mount-path "$POSTGRES_VOLUME_MOUNT"
+  railway variables --service "$POSTGRES_SERVICE" --set "PGDATA=${POSTGRES_DATA_DIR}"
+EOF_WARN
+        printf '%s\n' "$volume_output" >&2
+        exit 1
+      fi
+      printf '%s\n' "$volume_output" >&2
+      exit 1
+    fi
+    return
+  fi
+
+  cat <<EOF_WARN
+Warning: Postgres service "$POSTGRES_SERVICE" has no volume attached.
+Attach one manually or re-run with --attach-existing-postgres-volume (may hide existing data):
+  railway volume --service "$POSTGRES_SERVICE" add --mount-path "$POSTGRES_VOLUME_MOUNT"
+  railway variables --service "$POSTGRES_SERVICE" --set "PGDATA=${POSTGRES_DATA_DIR}"
+EOF_WARN
+}
+
 goodmem_cli_available() {
   command -v goodmem >/dev/null 2>&1
 }
@@ -294,23 +529,28 @@ PY
 }
 
 ensure_postgres_service() {
+  local created=false
   if service_exists "$POSTGRES_SERVICE"; then
-    return
+    created=false
+  else
+    created=true
+    echo "Creating Postgres service \"$POSTGRES_SERVICE\"..."
+    postgres_password="$(generate_password)"
+    railway add --image "$POSTGRES_IMAGE" --service "$POSTGRES_SERVICE" \
+      --variables "PORT=5432" \
+      --variables "POSTGRES_USER=${POSTGRES_USER}" \
+      --variables "POSTGRES_PASSWORD=${postgres_password}" \
+      --variables "POSTGRES_DB=${POSTGRES_DB}" \
+      --variables "PGDATA=${POSTGRES_DATA_DIR}"
+
+    if ! wait_for_service "$POSTGRES_SERVICE"; then
+      echo "Postgres service \"$POSTGRES_SERVICE\" not found after creation." >&2
+      echo "If your Postgres service uses a different name, re-run with --postgres-service." >&2
+      exit 1
+    fi
   fi
 
-  echo "Creating Postgres service \"$POSTGRES_SERVICE\"..."
-  postgres_password="$(generate_password)"
-  railway add --image "$POSTGRES_IMAGE" --service "$POSTGRES_SERVICE" \
-    --variables "PORT=5432" \
-    --variables "POSTGRES_USER=${POSTGRES_USER}" \
-    --variables "POSTGRES_PASSWORD=${postgres_password}" \
-    --variables "POSTGRES_DB=${POSTGRES_DB}"
-
-  if ! wait_for_service "$POSTGRES_SERVICE"; then
-    echo "Postgres service \"$POSTGRES_SERVICE\" not found after creation." >&2
-    echo "If your Postgres service uses a different name, re-run with --postgres-service." >&2
-    exit 1
-  fi
+  ensure_postgres_volume "$created"
 }
 
 ensure_goodmem_service() {
@@ -492,6 +732,9 @@ Endpoints:
 - Public IP: Railway does not provide a fixed public IP for services; use the domain(s).
 
 Next steps:
+- Resource limits: Railway defaults to your plan's per-service caps (Free 0.5 GB RAM, Trial 1 GB, etc.).
+  To match Fly defaults, set memory limits for ${GOODMEM_SERVICE} and ${POSTGRES_SERVICE} to
+  ${GOODMEM_MEMORY_MB} MB and ${POSTGRES_MEMORY_MB} MB in the Railway UI (Service -> Settings -> Deploy -> Resource Limits).
 - pgvector is bundled in the Postgres image and GoodMem will create the extension.
   If you want to verify manually, connect via the Postgres TCP proxy and run:
   CREATE EXTENSION IF NOT EXISTS vector;
