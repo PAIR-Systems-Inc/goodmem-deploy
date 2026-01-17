@@ -24,6 +24,19 @@ POSTGRES_IMAGE="pgvector/pgvector:pg17"
 REST_PORT=8080
 GRPC_PORT=50051
 INSTALL_CLI=false
+ROOT_API_KEY=""
+ROOT_USER_ID=""
+INIT_ALREADY=""
+INIT_MESSAGE=""
+COLOR_RESET=""
+COLOR_KEY=""
+COLOR_ID=""
+
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+  COLOR_RESET=$'\033[0m'
+  COLOR_KEY=$'\033[1;33m'
+  COLOR_ID=$'\033[1;36m'
+fi
 
 usage() {
   cat <<'USAGE'
@@ -526,6 +539,47 @@ wait_for_grpc() {
   echo "Warning: readiness did not respond within ${GRPC_WAIT_TIMEOUT}s. It may still be starting."
 }
 
+init_system_rest() {
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "curl not found; skipping system initialization." >&2
+    return
+  fi
+
+  local url="${rest_domain}/v1/system/init"
+  echo "Initializing GoodMem via REST..."
+
+  local response=""
+  if ! response="$(curl -sS -X POST "$url" 2>/dev/null)"; then
+    echo "Warning: system init request failed. Retry with: curl -sS -X POST ${url}" >&2
+    return
+  fi
+  if [ -z "$response" ]; then
+    echo "Warning: system init returned an empty response." >&2
+    return
+  fi
+
+  INIT_ALREADY="$(printf '%s' "$response" | "$JQ_BIN" -r '.alreadyInitialized // empty' 2>/dev/null || true)"
+  INIT_MESSAGE="$(printf '%s' "$response" | "$JQ_BIN" -r '.message // empty' 2>/dev/null || true)"
+  ROOT_API_KEY="$(printf '%s' "$response" | "$JQ_BIN" -r '.rootApiKey // empty' 2>/dev/null || true)"
+  ROOT_USER_ID="$(printf '%s' "$response" | "$JQ_BIN" -r '.userId // empty' 2>/dev/null || true)"
+
+  if [ -n "$INIT_MESSAGE" ]; then
+    echo "$INIT_MESSAGE"
+  fi
+  if [ -n "$ROOT_API_KEY" ]; then
+    echo "Root API key: ${COLOR_KEY}${ROOT_API_KEY}${COLOR_RESET}"
+    echo "Save this key now; it will not be shown again."
+  elif [ "$INIT_ALREADY" = "true" ]; then
+    echo "Root API key not returned because the system was already initialized."
+  fi
+  if [ -n "$ROOT_USER_ID" ]; then
+    echo "Root user ID: ${COLOR_ID}${ROOT_USER_ID}${COLOR_RESET}"
+  fi
+  if [ -z "$INIT_MESSAGE" ] && [ -z "$ROOT_API_KEY" ] && [ -z "$ROOT_USER_ID" ]; then
+    echo "Init response: ${response}"
+  fi
+}
+
 generate_password() {
   if command -v openssl >/dev/null 2>&1; then
     openssl rand -hex 24
@@ -705,6 +759,8 @@ grpc_domain="${GOODMEM_APP}.fly.dev:${GRPC_PORT}"
 postgres_internal="${POSTGRES_APP}.internal:5432"
 health_endpoint="${rest_domain}/startupz"
 
+init_system_rest
+
 cat <<EOF_MSG
 Bootstrap complete.
 
@@ -719,23 +775,19 @@ if goodmem_cli_available; then
   cat <<EOF_MSG
 
 GoodMem CLI (after gRPC is reachable):
-1) Initialize GoodMem (creates root user + master API key):
-   goodmem init --server https://${GOODMEM_APP}.fly.dev:${GRPC_PORT} --save-config=false
-2) Export the API key for future calls:
-   export GOODMEM_API_KEY="<API_KEY_FROM_INIT>"
-3) Example command:
+1) Export the API key from the REST init step:
+   export GOODMEM_API_KEY="<ROOT_API_KEY>"
+2) Example command:
    goodmem --server https://${GOODMEM_APP}.fly.dev:${GRPC_PORT} user list
 
 Notes:
 - Use https:// for gRPC when connecting via the Fly domain.
-- goodmem init saves config to ~/.goodmem/config.json by default; --save-config=false avoids overwriting existing config.
 EOF_MSG
 else
   cat <<EOF_MSG
 
-GoodMem CLI (after gRPC is reachable):
-- goodmem CLI not found in PATH. Install it, then run:
-  goodmem init --server https://${GOODMEM_APP}.fly.dev:${GRPC_PORT} --save-config=false
-- This first call creates the root user and master API key.
+GoodMem CLI (optional):
+- goodmem CLI not found in PATH. Install it if you want to use CLI commands.
+- Use the root API key from the REST init step with any client.
 EOF_MSG
 fi
