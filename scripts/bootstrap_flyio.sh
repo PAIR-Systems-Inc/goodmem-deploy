@@ -14,8 +14,10 @@ POSTGRES_PASSWORD=""
 POSTGRES_VOLUME="pg_data"
 POSTGRES_VOLUME_SIZE=10
 POSTGRES_MEMORY_MB=1024
+POSTGRES_CPU=1
 POSTGRES_DATA_DIR="/var/lib/postgresql/data/pgdata"
 GOODMEM_MEMORY_MB=1024
+GOODMEM_CPU=1
 GOODMEM_GRPC_TLS_ENABLED=false
 WAIT_FOR_GRPC=true
 GRPC_WAIT_TIMEOUT=120
@@ -32,6 +34,12 @@ INIT_MESSAGE=""
 COLOR_RESET=""
 COLOR_KEY=""
 COLOR_ID=""
+SIZE_TIER=""
+TIER_SET=false
+POSTGRES_MEMORY_SET=false
+GOODMEM_MEMORY_SET=false
+POSTGRES_CPU_SET=false
+GOODMEM_CPU_SET=false
 
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
   COLOR_RESET=$'\033[0m'
@@ -53,8 +61,11 @@ Options:
   --postgres-password PASS  Postgres password (generated if not set)
   --postgres-volume NAME    Postgres volume name (default: pg_data)
   --postgres-volume-size GB Postgres volume size in GB (default: 10)
-  --postgres-memory MB      Postgres VM memory in MB (default: 1024)
-  --goodmem-memory MB       GoodMem VM memory in MB (default: 1024)
+  --tier NAME               Instance size tier: small, medium, or large (prompts if unset)
+  --postgres-memory MB      Postgres VM memory in MB (default: 1024 or tier)
+  --postgres-cpus N         Postgres VM CPU count (default: 1 or tier)
+  --goodmem-memory MB       GoodMem VM memory in MB (default: 1024 or tier)
+  --goodmem-cpus N          GoodMem VM CPU count (default: 1 or tier)
   --no-wait                 Skip waiting for readiness (/startupz or gRPC)
   --wait-timeout SECONDS    Readiness wait timeout (default: 120)
   --image IMAGE             GoodMem image (default: ghcr.io/pair-systems-inc/goodmem/server:latest)
@@ -104,12 +115,29 @@ while [[ $# -gt 0 ]]; do
       POSTGRES_VOLUME_SIZE="$2"
       shift 2
       ;;
+    --tier)
+      SIZE_TIER="${2,,}"
+      TIER_SET=true
+      shift 2
+      ;;
     --postgres-memory)
       POSTGRES_MEMORY_MB="$2"
+      POSTGRES_MEMORY_SET=true
+      shift 2
+      ;;
+    --postgres-cpus)
+      POSTGRES_CPU="$2"
+      POSTGRES_CPU_SET=true
       shift 2
       ;;
     --goodmem-memory)
       GOODMEM_MEMORY_MB="$2"
+      GOODMEM_MEMORY_SET=true
+      shift 2
+      ;;
+    --goodmem-cpus)
+      GOODMEM_CPU="$2"
+      GOODMEM_CPU_SET=true
       shift 2
       ;;
     --no-wait)
@@ -419,6 +447,112 @@ ensure_org() {
   return
 }
 
+apply_tier() {
+  local tier="${1,,}"
+  local memory_mb=""
+  local cpu_count=""
+
+  case "$tier" in
+    small)
+      memory_mb=1024
+      cpu_count=1
+      ;;
+    medium)
+      memory_mb=2048
+      cpu_count=2
+      ;;
+    large)
+      memory_mb=4096
+      cpu_count=4
+      ;;
+    *)
+      echo "Unknown tier \"$tier\". Use small, medium, or large." >&2
+      exit 1
+      ;;
+  esac
+
+  if [ "$POSTGRES_MEMORY_SET" = false ]; then
+    POSTGRES_MEMORY_MB="$memory_mb"
+  fi
+  if [ "$GOODMEM_MEMORY_SET" = false ]; then
+    GOODMEM_MEMORY_MB="$memory_mb"
+  fi
+  if [ "$POSTGRES_CPU_SET" = false ]; then
+    POSTGRES_CPU="$cpu_count"
+  fi
+  if [ "$GOODMEM_CPU_SET" = false ]; then
+    GOODMEM_CPU="$cpu_count"
+  fi
+}
+
+prompt_tier() {
+  local tty_input=""
+  if [ -t 0 ]; then
+    tty_input=""
+  elif [ -r /dev/tty ]; then
+    tty_input="/dev/tty"
+  else
+    SIZE_TIER="small"
+    TIER_SET=true
+    apply_tier "$SIZE_TIER"
+    echo "No TTY detected; defaulting instance tier to small."
+    return
+  fi
+
+  echo "Select instance tier for GoodMem and Postgres:"
+  echo "  1) small  - 1024 MB RAM, 1 CPU"
+  echo "  2) medium - 2048 MB RAM, 2 CPU"
+  echo "  3) large  - 4096 MB RAM, 4 CPU"
+
+  local choice=""
+  while true; do
+    if [ -n "$tty_input" ]; then
+      read -r -p "Enter selection (1-3) or name [small]: " choice <"$tty_input"
+    else
+      read -r -p "Enter selection (1-3) or name [small]: " choice
+    fi
+    choice="${choice,,}"
+    if [ -z "$choice" ]; then
+      choice="small"
+    fi
+    case "$choice" in
+      1|small)
+        SIZE_TIER="small"
+        break
+        ;;
+      2|medium)
+        SIZE_TIER="medium"
+        break
+        ;;
+      3|large)
+        SIZE_TIER="large"
+        break
+        ;;
+      *)
+        echo "Invalid selection."
+        ;;
+    esac
+  done
+
+  TIER_SET=true
+  apply_tier "$SIZE_TIER"
+  echo "Using ${SIZE_TIER} tier for GoodMem and Postgres."
+}
+
+ensure_tier() {
+  if [ "$TIER_SET" = true ]; then
+    apply_tier "$SIZE_TIER"
+    return
+  fi
+
+  if [ "$POSTGRES_MEMORY_SET" = true ] || [ "$GOODMEM_MEMORY_SET" = true ] || \
+    [ "$POSTGRES_CPU_SET" = true ] || [ "$GOODMEM_CPU_SET" = true ]; then
+    return
+  fi
+
+  prompt_tier
+}
+
 app_exists() {
   local app="$1"
   "$FLYCTL_BIN" status --app "$app" >/dev/null 2>&1
@@ -660,7 +794,8 @@ primary_region = "$REGION"
 EOF
 
   "$FLYCTL_BIN" deploy --app "$POSTGRES_APP" --config "$postgres_config" --now \
-    --vm-memory "$POSTGRES_MEMORY_MB"
+    --vm-memory "$POSTGRES_MEMORY_MB" \
+    --vm-cpus "$POSTGRES_CPU"
 }
 
 ensure_goodmem_app() {
@@ -738,7 +873,8 @@ EOF
     "DB_PASSWORD=${POSTGRES_PASSWORD}"
 
   "$FLYCTL_BIN" deploy --app "$GOODMEM_APP" --config "$goodmem_config" --now --yes \
-    --vm-memory "$GOODMEM_MEMORY_MB"
+    --vm-memory "$GOODMEM_MEMORY_MB" \
+    --vm-cpus "$GOODMEM_CPU"
 }
 
 cleanup() {
@@ -757,6 +893,7 @@ ensure_login
 ensure_jq
 ensure_org
 ensure_app_names
+ensure_tier
 ensure_postgres_app
 ensure_goodmem_app
 wait_for_grpc
