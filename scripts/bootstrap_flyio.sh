@@ -19,6 +19,8 @@ POSTGRES_DATA_DIR="/var/lib/postgresql/data/pgdata"
 GOODMEM_MEMORY_MB=1024
 GOODMEM_CPU=1
 GOODMEM_GRPC_TLS_ENABLED=false
+GOODMEM_OCR_BASE_URL=""
+GOODMEM_OCR_RENDER_ENGINE="pdfbox"
 WAIT_FOR_GRPC=true
 GRPC_WAIT_TIMEOUT=120
 GRPC_WAIT_INTERVAL=5
@@ -69,6 +71,10 @@ Options:
   --no-wait                 Skip waiting for readiness (/startupz or gRPC)
   --wait-timeout SECONDS    Readiness wait timeout (default: 120)
   --image IMAGE             GoodMem image (default: ghcr.io/pair-systems-inc/goodmem/server:latest)
+  --goodmem-ocr-base-url URL
+                            Optional OCR service base URL for GoodMem
+  --goodmem-ocr-render-engine NAME
+                            OCR render engine for GoodMem (default: pdfbox)
   --postgres-image IMAGE    Postgres image (default: pgvector/pgvector:pg17)
   --install-cli             Install Fly CLI if missing
   -h, --help                Show this help
@@ -150,6 +156,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --image)
       IMAGE="$2"
+      shift 2
+      ;;
+    --goodmem-ocr-base-url)
+      GOODMEM_OCR_BASE_URL="$2"
+      shift 2
+      ;;
+    --goodmem-ocr-render-engine)
+      GOODMEM_OCR_RENDER_ENGINE="$2"
       shift 2
       ;;
     --postgres-image)
@@ -823,6 +837,14 @@ ensure_goodmem_app() {
   fi
 
   db_url="jdbc:postgresql://${POSTGRES_APP}.internal:5432/${POSTGRES_DB}?sslmode=disable"
+  local ocr_env_line=""
+  if [ -n "$GOODMEM_OCR_BASE_URL" ]; then
+    ocr_env_line="  GOODMEM_OCR_BASE_URL = \"${GOODMEM_OCR_BASE_URL}\""
+  fi
+  local ocr_engine_line=""
+  if [ -n "$GOODMEM_OCR_RENDER_ENGINE" ]; then
+    ocr_engine_line="  GOODMEM_OCR_RENDER_ENGINE = \"${GOODMEM_OCR_RENDER_ENGINE}\""
+  fi
 
   cat >"$goodmem_config" <<EOF
 app = "$GOODMEM_APP"
@@ -837,6 +859,8 @@ ${primary_region_line}
   GOODMEM_GRPC_TLS_ENABLED = "${GOODMEM_GRPC_TLS_ENABLED}"
   GOODMEM_GRPC_PORT = "${GRPC_PORT}"
   DB_URL = "${db_url}"
+${ocr_env_line}
+${ocr_engine_line}
 
 [[services]]
   internal_port = ${REST_PORT}
@@ -864,8 +888,10 @@ ${primary_region_line}
 
   [[services.ports]]
     port = ${GRPC_PORT}
-    handlers = ["tls"]
+    handlers = ["tls", "http"]
     tls_options = { "alpn" = ["h2"] }
+    [services.ports.http_options]
+      h2_backend = true
 EOF
 
   "$FLYCTL_BIN" secrets set --app "$GOODMEM_APP" \
