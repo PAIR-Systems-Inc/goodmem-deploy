@@ -928,6 +928,7 @@ rest_domain="https://${GOODMEM_APP}.fly.dev"
 grpc_domain="${GOODMEM_APP}.fly.dev:${GRPC_PORT}"
 postgres_internal="${POSTGRES_APP}.internal:5432"
 health_endpoint="${rest_domain}/startupz"
+console_endpoint="${rest_domain}/console/"
 
 init_system_rest
 
@@ -939,6 +940,7 @@ Endpoints:
 - gRPC (HTTP/2): ${grpc_domain} (TLS terminated by Fly, h2c to app)
 - Postgres (internal): ${postgres_internal}
 - Health: ${health_endpoint}
+- Console: ${console_endpoint}
 EOF_MSG
 
 if goodmem_cli_available; then

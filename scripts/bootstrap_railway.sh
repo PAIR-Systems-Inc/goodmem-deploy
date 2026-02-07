@@ -714,8 +714,10 @@ fi
 
 grpc_line="TCP proxy required (see steps below)"
 health_line="not available (requires a domain)"
+console_line="not available (requires a domain)"
 if [ -n "$rest_domain" ]; then
   health_line="https://${rest_domain}/startupz"
+  console_line="https://${rest_domain}/console/"
 fi
 
 wait_for_ready
@@ -729,6 +731,7 @@ Endpoints:
 - REST: $rest_line
 - gRPC (HTTP/2): $grpc_line
 - Health: $health_line
+- Console: $console_line
 - Public IP: Railway does not provide a fixed public IP for services; use the domain(s).
 
 Next steps:
