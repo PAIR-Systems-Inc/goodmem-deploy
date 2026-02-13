@@ -122,7 +122,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --tier)
-      SIZE_TIER="${2,,}"
+      SIZE_TIER="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"
       TIER_SET=true
       shift 2
       ;;
@@ -464,7 +464,7 @@ ensure_org() {
 }
 
 apply_tier() {
-  local tier="${1,,}"
+  local tier="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
   local memory_mb=""
   local cpu_count=""
 
