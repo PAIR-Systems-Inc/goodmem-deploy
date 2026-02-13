@@ -645,7 +645,8 @@ PY
 volume_exists() {
   local app="$1"
   local volume="$2"
-  "$FLYCTL_BIN" volumes list --app "$app" --json 2>/dev/null | grep -q "\"name\":\"${volume}\""
+  "$FLYCTL_BIN" volumes list --app "$app" --json 2>/dev/null \
+    | "$JQ_BIN" -e --arg n "$volume" 'if type=="array" then map(select(.name==$n)) | length > 0 else false end' >/dev/null 2>&1
 }
 
 goodmem_cli_available() {
@@ -811,7 +812,8 @@ EOF
 
   "$FLYCTL_BIN" deploy --app "$POSTGRES_APP" --config "$postgres_config" --now \
     --vm-memory "$POSTGRES_MEMORY_MB" \
-    --vm-cpus "$POSTGRES_CPU"
+    --vm-cpus "$POSTGRES_CPU" \
+    --vm-cpu-kind shared
 }
 
 ensure_goodmem_app() {
@@ -902,7 +904,8 @@ EOF
 
   "$FLYCTL_BIN" deploy --app "$GOODMEM_APP" --config "$goodmem_config" --now --yes \
     --vm-memory "$GOODMEM_MEMORY_MB" \
-    --vm-cpus "$GOODMEM_CPU"
+    --vm-cpus "$GOODMEM_CPU" \
+    --vm-cpu-kind shared
 }
 
 cleanup() {
