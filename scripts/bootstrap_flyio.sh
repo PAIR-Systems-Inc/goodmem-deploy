@@ -367,7 +367,9 @@ ensure_org() {
     prompt_org_slug
     return
   fi
-  mapfile -t org_lines <<< "$orgs_parsed"
+  while IFS= read -r line; do
+    org_lines+=("$line")
+  done <<< "$orgs_parsed"
 
   if [ "${#org_lines[@]}" -eq 0 ]; then
     prompt_org_slug
