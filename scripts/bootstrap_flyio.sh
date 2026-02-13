@@ -527,7 +527,7 @@ prompt_tier() {
     else
       read -r -p "Enter selection (1-3) or name [small]: " choice
     fi
-    choice="${choice,,}"
+    choice="$(printf '%s' "$choice" | tr '[:upper:]' '[:lower:]')"
     if [ -z "$choice" ]; then
       choice="small"
     fi
