@@ -20,7 +20,7 @@ GOODMEM_MEMORY_MB=1024
 GOODMEM_CPU=1
 GOODMEM_GRPC_TLS_ENABLED=false
 GOODMEM_OCR_BASE_URL=""
-GOODMEM_OCR_RENDER_ENGINE="pdfbox"
+GOODMEM_OCR_RENDER_ENGINE=""
 WAIT_FOR_GRPC=true
 GRPC_WAIT_TIMEOUT=120
 GRPC_WAIT_INTERVAL=5
@@ -74,7 +74,8 @@ Options:
   --goodmem-ocr-base-url URL
                             Optional OCR service base URL for GoodMem
   --goodmem-ocr-render-engine NAME
-                            OCR render engine for GoodMem (default: pdfbox)
+                            Optional OCR render engine override for GoodMem
+                            (default: auto-detect, preferring pdfium)
   --postgres-image IMAGE    Postgres image (default: pgvector/pgvector:pg17)
   --install-cli             Install Fly CLI if missing
   -h, --help                Show this help
