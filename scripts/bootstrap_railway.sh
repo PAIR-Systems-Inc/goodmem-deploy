@@ -564,6 +564,7 @@ ensure_goodmem_service() {
     --variables "GOODMEM_REST_TLS_ENABLED=false" \
     --variables "GOODMEM_GRPC_TLS_ENABLED=true" \
     --variables "GOODMEM_GRPC_PORT=${GRPC_PORT}" \
+    --variables "JAVA_TOOL_OPTIONS=-XX:MaxRAMPercentage=70 -XX:InitialRAMPercentage=25" \
     --variables "DB_USER=${ref_user}" \
     --variables "DB_PASSWORD=${ref_password}" \
     --variables "DB_URL=${ref_url}"
@@ -691,6 +692,7 @@ railway variables --service "$GOODMEM_SERVICE" \
   --set "GOODMEM_REST_TLS_ENABLED=false" \
   --set "GOODMEM_GRPC_TLS_ENABLED=true" \
   --set "GOODMEM_GRPC_PORT=${GRPC_PORT}" \
+  --set "JAVA_TOOL_OPTIONS=-XX:MaxRAMPercentage=70 -XX:InitialRAMPercentage=25" \
   --set "DB_USER=${ref_user}" \
   --set "DB_PASSWORD=${ref_password}" \
   --set "DB_URL=${ref_url}"
