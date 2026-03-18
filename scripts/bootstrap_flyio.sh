@@ -864,6 +864,7 @@ ${primary_region_line}
   GOODMEM_GRPC_TLS_ENABLED = "${GOODMEM_GRPC_TLS_ENABLED}"
   GOODMEM_GRPC_PORT = "${GRPC_PORT}"
   DB_URL = "${db_url}"
+  JAVA_TOOL_OPTIONS = "-XX:MaxRAMPercentage=70 -XX:InitialRAMPercentage=25"
 ${ocr_env_line}
 ${ocr_engine_line}
 
