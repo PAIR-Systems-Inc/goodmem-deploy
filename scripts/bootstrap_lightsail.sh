@@ -1792,6 +1792,7 @@ refresh_ssh_access() {
 run_ssh() {
   local remote_cmd="$1"
   local -a ssh_args=(
+    -n
     -o StrictHostKeyChecking=no
     -o UserKnownHostsFile=/dev/null
     -o ConnectTimeout=10
