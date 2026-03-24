@@ -40,6 +40,7 @@ DNS_WAIT_INTERVAL=15
 DOMAIN=""
 CONTACT_EMAIL=""
 PREFERRED_REST_PORT=8080
+PREFERRED_DOMAIN_GRPC_PORT=9090
 PUBLIC_GRPC_PORT=50051
 WAIT_FOR_READY=true
 LIST_MODE=false
@@ -429,6 +430,14 @@ ensure_tier() {
 
 domain_enabled() {
   [ -n "$DOMAIN" ]
+}
+
+preferred_install_grpc_port() {
+  if domain_enabled; then
+    printf '%s' "$PREFERRED_DOMAIN_GRPC_PORT"
+  else
+    printf '%s' "$PUBLIC_GRPC_PORT"
+  fi
 }
 
 refresh_public_urls() {
@@ -1188,7 +1197,7 @@ EOF
 write_port_infos_file() {
   local mode="${1:-initial}"
   local rest_port="${2:-${PREFERRED_REST_PORT}}"
-  local grpc_port="${3:-${PUBLIC_GRPC_PORT}}"
+  local grpc_port="${3:-$(preferred_install_grpc_port)}"
 
   PORT_INFOS_FILE="$(mktemp)"
   # Domain mode exposes fixed public ports. Direct-IP mode does not know the real
@@ -1275,7 +1284,7 @@ EOF
 configure_instance_ports() {
   local mode="${1:-initial}"
   local rest_port="${2:-${PREFERRED_REST_PORT}}"
-  local grpc_port="${3:-${PUBLIC_GRPC_PORT}}"
+  local grpc_port="${3:-$(preferred_install_grpc_port)}"
 
   if [ -n "${PORT_INFOS_FILE:-}" ] && [ -f "$PORT_INFOS_FILE" ]; then
     rm -f "$PORT_INFOS_FILE"
@@ -1516,7 +1525,7 @@ os.chmod(path, 0o600)
 PY
 }
 
-trap 'code=\$?; write_status FAILED "bootstrap failed" "{\"exit_code\":\$code}"; exit \$code' ERR
+trap 'code=\$?; write_status FAILED "bootstrap failed"; exit \$code' ERR
 
 write_status STARTING "bootstrap started"
 
@@ -1549,7 +1558,9 @@ install_cmd=(
   --profile-name ${profile_name_q}
   --remote-db
   --rest-port ${PREFERRED_REST_PORT}
-  --grpc-port ${PUBLIC_GRPC_PORT}
+  # Domain mode keeps 50051 free for Caddy's public listener, so the app starts
+  # on a private host port and the proxy forwards to whatever the installer picks.
+  --grpc-port $(preferred_install_grpc_port)
   --db-url "\${DB_URL_JDBC}"
   --db-user ${db_master_username_q}
   --db-password ${db_master_password_q}
@@ -1577,7 +1588,7 @@ local_rest_scheme = "http" if server_url.startswith("http://") else "https"
 
 values = {
     "REST_PORT": install_cfg.get("rest_port", ${PREFERRED_REST_PORT}),
-    "GRPC_PORT": install_cfg.get("grpc_port", ${PUBLIC_GRPC_PORT}),
+    "GRPC_PORT": install_cfg.get("grpc_port", $(preferred_install_grpc_port)),
     "INSTALL_DIR": str(install_config_path.parent),
     "SERVER_URL": server_url,
     "LOCAL_REST_SCHEME": local_rest_scheme,
@@ -2070,7 +2081,7 @@ Instance:   $INSTANCE_NAME
 Static IP:  $INSTANCE_IP
 Database:   $DB_RESOURCE_NAME
 Expected REST URL:   https://${INSTANCE_IP}:${PREFERRED_REST_PORT} (preferred install port)
-Expected gRPC URL:   https://${INSTANCE_IP}:${PUBLIC_GRPC_PORT} (preferred install port)
+Expected gRPC URL:   https://${INSTANCE_IP}:$(preferred_install_grpc_port) (preferred install port)
 
 Notes:
 - SSH is open now; REST/gRPC are temporarily exposed on the preferred install ports until you re-run without --no-wait and the script reconciles the firewall to the actual runtime ports.
