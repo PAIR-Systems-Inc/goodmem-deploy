@@ -343,16 +343,23 @@ prompt_tier() {
   local tty_input=""
   local summary=""
   local detail=""
+  local choice=""
+  local prompt_message="Enter selection (1-4) or name [small]: "
+
+  default_tier_for_noninteractive() {
+    SIZE_TIER="small"
+    TIER_SET=true
+    apply_tier_defaults
+    summary="$(tier_summary "$SIZE_TIER")"
+    echo "$1 defaulting Lightsail tier to ${SIZE_TIER} (${summary})."
+  }
+
   if [ -t 0 ]; then
     tty_input=""
   elif [ -r /dev/tty ]; then
     tty_input="/dev/tty"
   else
-    SIZE_TIER="small"
-    TIER_SET=true
-    apply_tier_defaults
-    summary="$(tier_summary "$SIZE_TIER")"
-    echo "No TTY detected; defaulting Lightsail tier to ${SIZE_TIER} (${summary})."
+    default_tier_for_noninteractive "No TTY detected;"
     return
   fi
 
@@ -362,12 +369,17 @@ prompt_tier() {
   echo "  3) large   - $(tier_summary large)"
   echo "  4) x-large - $(tier_summary x-large)"
 
-  local choice=""
   while true; do
     if [ -n "$tty_input" ]; then
-      read -r -p "Enter selection (1-4) or name [small]: " choice <"$tty_input"
+      if ! read -r -p "$prompt_message" choice <"$tty_input"; then
+        default_tier_for_noninteractive "Unable to read from /dev/tty;"
+        return
+      fi
     else
-      read -r -p "Enter selection (1-4) or name [small]: " choice
+      if ! read -r -p "$prompt_message" choice; then
+        default_tier_for_noninteractive "Interactive tier prompt unavailable;"
+        return
+      fi
     fi
     choice="$(printf '%s' "$choice" | tr '[:upper:]' '[:lower:]')"
     if [ -z "$choice" ]; then
