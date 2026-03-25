@@ -213,12 +213,14 @@ tty_available() {
 
 json_field() {
   local expression="$1"
-  python3 - "$expression" <<'PY'
+  local json_input="${2:-}"
+  JSON_FIELD_INPUT="$json_input" python3 - "$expression" <<'PY'
 import json
+import os
 import sys
 
 expr = sys.argv[1]
-data = json.load(sys.stdin)
+data = json.loads(os.environ["JSON_FIELD_INPUT"])
 ns = {"data": data}
 value = eval(expr, {"__builtins__": {}}, ns)
 if value is None:
@@ -269,7 +271,7 @@ apply_tier_defaults() {
       if [ "$SERVER_TYPE_SET" != "true" ]; then
         case "$(market_for_location "$LOCATION")" in
           eu) SERVER_TYPE="cx23" ;;
-          *) SERVER_TYPE="cpx22" ;;
+          *) SERVER_TYPE="cpx21" ;;
         esac
       fi
       ;;
@@ -277,7 +279,7 @@ apply_tier_defaults() {
       if [ "$SERVER_TYPE_SET" != "true" ]; then
         case "$(market_for_location "$LOCATION")" in
           eu) SERVER_TYPE="cx33" ;;
-          *) SERVER_TYPE="cpx32" ;;
+          *) SERVER_TYPE="cpx31" ;;
         esac
       fi
       ;;
@@ -285,7 +287,7 @@ apply_tier_defaults() {
       if [ "$SERVER_TYPE_SET" != "true" ]; then
         case "$(market_for_location "$LOCATION")" in
           eu) SERVER_TYPE="cx43" ;;
-          *) SERVER_TYPE="cpx42" ;;
+          *) SERVER_TYPE="cpx41" ;;
         esac
       fi
       ;;
@@ -321,7 +323,7 @@ tier_summary() {
     x-large:eu) printf '16 GB RAM, 4 dedicated vCPU, about $37/mo + self-hosted Postgres' ;;
     2x-large:eu) printf '32 GB RAM, 8 dedicated vCPU, about $73/mo + self-hosted Postgres' ;;
     4x-large:eu) printf '64 GB RAM, 16 dedicated vCPU, about $147/mo + self-hosted Postgres' ;;
-    small:*) printf '4 GB RAM, 2 shared vCPU, about $12/mo + self-hosted Postgres' ;;
+    small:*) printf '4 GB RAM, 3 shared vCPU, about $12/mo + self-hosted Postgres' ;;
     medium:*) printf '8 GB RAM, 4 shared vCPU, about $21/mo + self-hosted Postgres' ;;
     large:*) printf '16 GB RAM, 8 shared vCPU, about $39/mo + self-hosted Postgres' ;;
     x-large:*) printf '16 GB RAM, 4 dedicated vCPU, about $34/mo + self-hosted Postgres' ;;
@@ -586,14 +588,14 @@ ssh_key_exists() {
 refresh_server_metadata() {
   local server_json=""
   server_json="$("$HCLOUD_BIN" server describe "$SERVER_NAME" -o json)"
-  SERVER_ID="$(printf '%s' "$server_json" | json_field 'data.get("server", data).get("id")')"
-  INSTANCE_IP="$(printf '%s' "$server_json" | json_field 'data.get("server", data).get("public_net", {}).get("ipv4", {}).get("ip")')"
+  SERVER_ID="$(json_field 'data.get("server", data).get("id")' "$server_json")"
+  INSTANCE_IP="$(json_field 'data.get("server", data).get("public_net", {}).get("ipv4", {}).get("ip")' "$server_json")"
 }
 
 refresh_volume_metadata() {
   local volume_json=""
   volume_json="$("$HCLOUD_BIN" volume describe "$VOLUME_NAME" -o json)"
-  VOLUME_ID="$(printf '%s' "$volume_json" | json_field 'data.get("volume", data).get("id")')"
+  VOLUME_ID="$(json_field 'data.get("volume", data).get("id")' "$volume_json")"
 }
 
 server_status() {
@@ -601,7 +603,7 @@ server_status() {
   if ! server_json="$("$HCLOUD_BIN" server describe "$SERVER_NAME" -o json 2>/dev/null)"; then
     return 1
   fi
-  printf '%s' "$server_json" | json_field 'data.get("server", data).get("status")'
+  json_field 'data.get("server", data).get("status")' "$server_json"
 }
 
 ensure_local_ssh_key() {
@@ -682,6 +684,8 @@ write_user_data_file() {
   local app_bind_host
   local rest_tls_enabled
   local grpc_tls_enabled
+  local bootstrap_script_file
+  local bootstrap_b64
 
   app_grpc_port="$(bootstrap_app_grpc_port)"
   if [ -n "$DOMAIN" ]; then
@@ -692,51 +696,44 @@ write_user_data_file() {
   else
     enable_public_proxy="false"
     app_bind_host="0.0.0.0"
-    rest_tls_enabled="true"
+    rest_tls_enabled="false"
     grpc_tls_enabled="true"
   fi
 
-  USER_DATA_FILE="$(mktemp "${TMP_DIR}/hetzner-user-data-XXXX.yaml")"
-  cat >"$USER_DATA_FILE" <<EOF
-#cloud-config
-package_update: true
-write_files:
-  - path: /root/goodmem-hetzner-bootstrap.sh
-    permissions: '0700'
-    owner: root:root
-    content: |
-      #!/usr/bin/env bash
-      set -euo pipefail
-      STATUS_DIR="/opt/goodmem-hetzner"
-      STATUS_FILE="${STATUS_FILE_REMOTE}"
-      GOODMEM_IMAGE="${IMAGE}"
-      POSTGRES_IMAGE="pgvector/pgvector:pg17"
-      DB_CONTAINER="goodmem-postgres"
-      APP_CONTAINER="goodmem-server"
-      NETWORK_NAME="goodmem-net"
-      DB_USER="goodmem"
-      DB_NAME="goodmem"
-      DB_PASSWORD="${DB_PASSWORD}"
-      PUBLIC_DOMAIN="${DOMAIN}"
-      CONTACT_EMAIL="${CONTACT_EMAIL}"
-      ENABLE_PUBLIC_PROXY="${enable_public_proxy}"
-      VOLUME_DEV="/dev/disk/by-id/scsi-0HC_Volume_${VOLUME_ID}"
-      MOUNT_POINT="/mnt/pgdata"
-      REST_PORT=${INTERNAL_REST_PORT}
-      APP_GRPC_PORT=${app_grpc_port}
-      PUBLIC_GRPC_PORT=${PUBLIC_GRPC_PORT}
-      APP_BIND_HOST="${app_bind_host}"
-      REST_TLS_ENABLED="${rest_tls_enabled}"
-      GRPC_TLS_ENABLED="${grpc_tls_enabled}"
-      PROFILE_NAME="${PROFILE_NAME}"
+  bootstrap_script_file="$(mktemp "${TMP_DIR}/hetzner-bootstrap-XXXX.sh")"
+  cat >"$bootstrap_script_file" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+STATUS_DIR="/opt/goodmem-hetzner"
+STATUS_FILE="${STATUS_FILE_REMOTE}"
+GOODMEM_IMAGE="${IMAGE}"
+POSTGRES_IMAGE="pgvector/pgvector:pg17"
+DB_CONTAINER="goodmem-postgres"
+APP_CONTAINER="goodmem-server"
+NETWORK_NAME="goodmem-net"
+DB_USER="goodmem"
+DB_NAME="goodmem"
+DB_PASSWORD="${DB_PASSWORD}"
+PUBLIC_DOMAIN="${DOMAIN}"
+CONTACT_EMAIL="${CONTACT_EMAIL}"
+ENABLE_PUBLIC_PROXY="${enable_public_proxy}"
+VOLUME_DEV="/dev/disk/by-id/scsi-0HC_Volume_${VOLUME_ID}"
+MOUNT_POINT="/mnt/pgdata"
+REST_PORT=${INTERNAL_REST_PORT}
+APP_GRPC_PORT=${app_grpc_port}
+PUBLIC_GRPC_PORT=${PUBLIC_GRPC_PORT}
+APP_BIND_HOST="${app_bind_host}"
+REST_TLS_ENABLED="${rest_tls_enabled}"
+GRPC_TLS_ENABLED="${grpc_tls_enabled}"
+PROFILE_NAME="${PROFILE_NAME}"
 
-      mkdir -p "\${STATUS_DIR}"
+mkdir -p "\${STATUS_DIR}"
 
-      write_status() {
-        local state="\$1"
-        local message="\$2"
-        export STATUS_STATE="\${state}" STATUS_MESSAGE="\${message}" STATUS_FILE
-        python3 - <<'PY'
+write_status() {
+  local state="\$1"
+  local message="\$2"
+  export STATUS_STATE="\${state}" STATUS_MESSAGE="\${message}" STATUS_FILE
+  python3 - <<'PY'
 import json
 import os
 import pathlib
@@ -750,151 +747,154 @@ if path.exists():
         pass
 path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 PY
-      }
+}
 
-      trap 'write_status FAILED "command failed at line \$LINENO: \$BASH_COMMAND"' ERR
-      write_status STARTING "bootstrap started"
+trap 'write_status FAILED "command failed at line \$LINENO: \$BASH_COMMAND"' ERR
+write_status STARTING "bootstrap started"
 
-      total_mb=\$(awk '/MemTotal:/ {print int(\$2/1024)}' /proc/meminfo)
-      os_reserve=\$(( total_mb * 15 / 100 ))
-      [ "\${os_reserve}" -lt 384 ] && os_reserve=384
-      [ "\${os_reserve}" -gt 2048 ] && os_reserve=2048
-      available_mb=\$(( total_mb - os_reserve ))
-      goodmem_mb=\$(( available_mb * 30 / 100 ))
-      postgres_mb=\$(( available_mb - goodmem_mb ))
-      jvm_ram_pct=70
-      if [ "\${goodmem_mb}" -lt 768 ]; then
-        jvm_ram_pct=50
-      elif [ "\${goodmem_mb}" -lt 1536 ]; then
-        jvm_ram_pct=65
-      fi
-      shared_buffers_mb=\$(( postgres_mb * 25 / 100 ))
-      [ "\${shared_buffers_mb}" -lt 128 ] && shared_buffers_mb=128
-      [ "\${shared_buffers_mb}" -gt 8192 ] && shared_buffers_mb=8192
-      effective_cache_mb=\$(( postgres_mb * 70 / 100 ))
-      work_mem_mb=4
-      [ "\${postgres_mb}" -ge 2048 ] && work_mem_mb=8
-      [ "\${postgres_mb}" -ge 4096 ] && work_mem_mb=16
-      [ "\${postgres_mb}" -ge 8192 ] && work_mem_mb=32
-      [ "\${postgres_mb}" -ge 16384 ] && work_mem_mb=64
-      maint_mem_mb=64
-      [ "\${postgres_mb}" -ge 2048 ] && maint_mem_mb=128
-      [ "\${postgres_mb}" -ge 4096 ] && maint_mem_mb=256
-      [ "\${postgres_mb}" -ge 8192 ] && maint_mem_mb=512
-      [ "\${postgres_mb}" -ge 16384 ] && maint_mem_mb=1024
-      [ "\${postgres_mb}" -ge 32768 ] && maint_mem_mb=2048
+total_mb=\$(awk '/MemTotal:/ {print int(\$2/1024)}' /proc/meminfo)
+os_reserve=\$(( total_mb * 15 / 100 ))
+[ "\${os_reserve}" -lt 384 ] && os_reserve=384
+[ "\${os_reserve}" -gt 2048 ] && os_reserve=2048
+available_mb=\$(( total_mb - os_reserve ))
+goodmem_mb=\$(( available_mb * 30 / 100 ))
+postgres_mb=\$(( available_mb - goodmem_mb ))
+jvm_ram_pct=70
+if [ "\${goodmem_mb}" -lt 768 ]; then
+  jvm_ram_pct=50
+elif [ "\${goodmem_mb}" -lt 1536 ]; then
+  jvm_ram_pct=65
+fi
+shared_buffers_mb=\$(( postgres_mb * 25 / 100 ))
+[ "\${shared_buffers_mb}" -lt 128 ] && shared_buffers_mb=128
+[ "\${shared_buffers_mb}" -gt 8192 ] && shared_buffers_mb=8192
+effective_cache_mb=\$(( postgres_mb * 70 / 100 ))
+work_mem_mb=4
+[ "\${postgres_mb}" -ge 2048 ] && work_mem_mb=8
+[ "\${postgres_mb}" -ge 4096 ] && work_mem_mb=16
+[ "\${postgres_mb}" -ge 8192 ] && work_mem_mb=32
+[ "\${postgres_mb}" -ge 16384 ] && work_mem_mb=64
+maint_mem_mb=64
+[ "\${postgres_mb}" -ge 2048 ] && maint_mem_mb=128
+[ "\${postgres_mb}" -ge 4096 ] && maint_mem_mb=256
+[ "\${postgres_mb}" -ge 8192 ] && maint_mem_mb=512
+[ "\${postgres_mb}" -ge 16384 ] && maint_mem_mb=1024
+[ "\${postgres_mb}" -ge 32768 ] && maint_mem_mb=2048
 
-      swap_mb=1024
-      [ "\${total_mb}" -gt 8192 ] && swap_mb=2048
-      if [ ! -f /swapfile ]; then
-        write_status CONFIGURING_SWAP "configuring swap"
-        fallocate -l "\${swap_mb}M" /swapfile || dd if=/dev/zero of=/swapfile bs=1M count="\${swap_mb}"
-        chmod 600 /swapfile
-        mkswap /swapfile
-        swapon /swapfile
-        echo '/swapfile none swap sw 0 0' >> /etc/fstab
-      fi
-      sysctl -w vm.swappiness=1 >/dev/null
-      if ! grep -q '^vm.swappiness=1$' /etc/sysctl.conf; then
-        echo 'vm.swappiness=1' >> /etc/sysctl.conf
-      fi
+swap_mb=1024
+[ "\${total_mb}" -gt 8192 ] && swap_mb=2048
+if [ ! -f /swapfile ]; then
+  write_status CONFIGURING_SWAP "configuring swap"
+  fallocate -l "\${swap_mb}M" /swapfile || dd if=/dev/zero of=/swapfile bs=1M count="\${swap_mb}"
+  chmod 600 /swapfile
+  mkswap /swapfile
+  swapon /swapfile
+  echo '/swapfile none swap sw 0 0' >> /etc/fstab
+fi
+sysctl -w vm.swappiness=1 >/dev/null
+if ! grep -q '^vm.swappiness=1$' /etc/sysctl.conf; then
+  echo 'vm.swappiness=1' >> /etc/sysctl.conf
+fi
 
-      write_status WAITING_FOR_VOLUME "waiting for attached volume"
-      for _ in \$(seq 1 60); do
-        [ -b "\${VOLUME_DEV}" ] && break
-        sleep 5
-      done
-      if [ ! -b "\${VOLUME_DEV}" ]; then
-        echo "volume device not found: \${VOLUME_DEV}" >&2
-        exit 1
-      fi
+write_status WAITING_FOR_VOLUME "waiting for attached volume"
+for _ in \$(seq 1 60); do
+  [ -b "\${VOLUME_DEV}" ] && break
+  sleep 5
+done
+if [ ! -b "\${VOLUME_DEV}" ]; then
+  echo "volume device not found: \${VOLUME_DEV}" >&2
+  exit 1
+fi
 
-      mkdir -p "\${MOUNT_POINT}"
-      if ! blkid "\${VOLUME_DEV}" | grep -q 'TYPE='; then
-        mkfs.ext4 "\${VOLUME_DEV}"
-      fi
-      if ! mountpoint -q "\${MOUNT_POINT}"; then
-        mount "\${VOLUME_DEV}" "\${MOUNT_POINT}"
-      fi
-      if ! grep -q "\${VOLUME_DEV}" /etc/fstab; then
-        echo "\${VOLUME_DEV} \${MOUNT_POINT} ext4 defaults 0 2" >> /etc/fstab
-      fi
+mkdir -p "\${MOUNT_POINT}"
+if ! blkid "\${VOLUME_DEV}" | grep -q 'TYPE='; then
+  mkfs.ext4 "\${VOLUME_DEV}"
+fi
+if ! mountpoint -q "\${MOUNT_POINT}"; then
+  mount "\${VOLUME_DEV}" "\${MOUNT_POINT}"
+fi
+if ! grep -q "\${VOLUME_DEV}" /etc/fstab; then
+  echo "\${VOLUME_DEV} \${MOUNT_POINT} ext4 defaults 0 2" >> /etc/fstab
+fi
 
-      docker network inspect "\${NETWORK_NAME}" >/dev/null 2>&1 || docker network create "\${NETWORK_NAME}" >/dev/null
-      docker rm -f "\${DB_CONTAINER}" "\${APP_CONTAINER}" >/dev/null 2>&1 || true
+docker network inspect "\${NETWORK_NAME}" >/dev/null 2>&1 || docker network create "\${NETWORK_NAME}" >/dev/null
+docker rm -f "\${DB_CONTAINER}" "\${APP_CONTAINER}" >/dev/null 2>&1 || true
 
-      write_status STARTING_DATABASE "starting PostgreSQL"
-      docker run -d \
-        --name "\${DB_CONTAINER}" \
-        --restart unless-stopped \
-        --memory "\${postgres_mb}m" \
-        --network "\${NETWORK_NAME}" \
-        -v "\${MOUNT_POINT}:/var/lib/postgresql/data" \
-        -e POSTGRES_USER="\${DB_USER}" \
-        -e POSTGRES_DB="\${DB_NAME}" \
-        -e POSTGRES_PASSWORD="\${DB_PASSWORD}" \
-        "\${POSTGRES_IMAGE}" \
-        postgres \
-          -c shared_buffers="\${shared_buffers_mb}MB" \
-          -c effective_cache_size="\${effective_cache_mb}MB" \
-          -c work_mem="\${work_mem_mb}MB" \
-          -c maintenance_work_mem="\${maint_mem_mb}MB" \
-          -c max_connections=30 >/dev/null
+write_status STARTING_DATABASE "starting PostgreSQL"
+docker run -d \
+  --name "\${DB_CONTAINER}" \
+  --restart unless-stopped \
+  --memory "\${postgres_mb}m" \
+  --network "\${NETWORK_NAME}" \
+  -v "\${MOUNT_POINT}:/var/lib/postgresql/data" \
+  -e POSTGRES_USER="\${DB_USER}" \
+  -e POSTGRES_DB="\${DB_NAME}" \
+  -e POSTGRES_PASSWORD="\${DB_PASSWORD}" \
+  -e PGDATA="/var/lib/postgresql/data/pgdata" \
+  "\${POSTGRES_IMAGE}" \
+  postgres \
+    -c shared_buffers="\${shared_buffers_mb}MB" \
+    -c effective_cache_size="\${effective_cache_mb}MB" \
+    -c work_mem="\${work_mem_mb}MB" \
+    -c maintenance_work_mem="\${maint_mem_mb}MB" \
+    -c max_connections=30 >/dev/null
 
-      for _ in \$(seq 1 60); do
-        if docker exec "\${DB_CONTAINER}" pg_isready -U "\${DB_USER}" -d "\${DB_NAME}" >/dev/null 2>&1; then
-          break
-        fi
-        sleep 5
-      done
-      docker exec -e PGPASSWORD="\${DB_PASSWORD}" "\${DB_CONTAINER}" \
-        psql -U "\${DB_USER}" -d "\${DB_NAME}" -c 'CREATE EXTENSION IF NOT EXISTS vector;' >/dev/null
+for _ in \$(seq 1 60); do
+  if docker exec "\${DB_CONTAINER}" pg_isready -U "\${DB_USER}" -d "\${DB_NAME}" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 5
+done
+docker exec -e PGPASSWORD="\${DB_PASSWORD}" "\${DB_CONTAINER}" \
+  psql -U "\${DB_USER}" -d "\${DB_NAME}" -c 'CREATE EXTENSION IF NOT EXISTS vector;' >/dev/null
 
-      write_status STARTING_GOODMEM "starting GoodMem"
-      if [ "\${APP_BIND_HOST}" = "127.0.0.1" ]; then
-        rest_publish="127.0.0.1:\${REST_PORT}:\${REST_PORT}"
-        grpc_publish="127.0.0.1:\${APP_GRPC_PORT}:\${APP_GRPC_PORT}"
-      else
-        rest_publish="\${REST_PORT}:\${REST_PORT}"
-        grpc_publish="\${APP_GRPC_PORT}:\${APP_GRPC_PORT}"
-      fi
+write_status STARTING_GOODMEM "starting GoodMem"
+if [ "\${APP_BIND_HOST}" = "127.0.0.1" ]; then
+  rest_publish="127.0.0.1:\${REST_PORT}:\${REST_PORT}"
+  grpc_publish="127.0.0.1:\${APP_GRPC_PORT}:\${APP_GRPC_PORT}"
+else
+  rest_publish="\${REST_PORT}:\${REST_PORT}"
+  grpc_publish="\${APP_GRPC_PORT}:\${APP_GRPC_PORT}"
+fi
 
-      docker run -d \
-        --name "\${APP_CONTAINER}" \
-        --restart unless-stopped \
-        --memory "\${goodmem_mb}m" \
-        --network "\${NETWORK_NAME}" \
-        -p "\${rest_publish}" \
-        -p "\${grpc_publish}" \
-        -e PORT="\${REST_PORT}" \
-        -e GOODMEM_REST_TLS_ENABLED="\${REST_TLS_ENABLED}" \
-        -e GOODMEM_GRPC_TLS_ENABLED="\${GRPC_TLS_ENABLED}" \
-        -e GOODMEM_GRPC_PORT="\${APP_GRPC_PORT}" \
-        -e DB_URL="jdbc:postgresql://\${DB_CONTAINER}:5432/\${DB_NAME}?sslmode=disable" \
-        -e JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=\${jvm_ram_pct} -XX:InitialRAMPercentage=25" \
-        "\${GOODMEM_IMAGE}" >/dev/null
+docker run -d \
+  --name "\${APP_CONTAINER}" \
+  --restart unless-stopped \
+  --memory "\${goodmem_mb}m" \
+  --network "\${NETWORK_NAME}" \
+  -p "\${rest_publish}" \
+  -p "\${grpc_publish}" \
+  -e PORT="\${REST_PORT}" \
+  -e GOODMEM_REST_TLS_ENABLED="\${REST_TLS_ENABLED}" \
+  -e GOODMEM_GRPC_TLS_ENABLED="\${GRPC_TLS_ENABLED}" \
+  -e GOODMEM_GRPC_PORT="\${APP_GRPC_PORT}" \
+  -e DB_URL="jdbc:postgresql://\${DB_CONTAINER}:5432/\${DB_NAME}?sslmode=disable" \
+  -e DB_USER="\${DB_USER}" \
+  -e DB_PASSWORD="\${DB_PASSWORD}" \
+  -e JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=\${jvm_ram_pct} -XX:InitialRAMPercentage=25" \
+  "\${GOODMEM_IMAGE}" >/dev/null
 
-      if [ "\${REST_TLS_ENABLED}" = "true" ]; then
-        local_ready_url="https://127.0.0.1:\${REST_PORT}/readyz"
-        local_init_url="https://127.0.0.1:\${REST_PORT}/v1/system/init"
-        local_curl_args=(-ksS)
-      else
-        local_ready_url="http://127.0.0.1:\${REST_PORT}/readyz"
-        local_init_url="http://127.0.0.1:\${REST_PORT}/v1/system/init"
-        local_curl_args=(-fsS)
-      fi
+if [ "\${REST_TLS_ENABLED}" = "true" ]; then
+  local_ready_url="https://127.0.0.1:\${REST_PORT}/readyz"
+  local_init_url="https://127.0.0.1:\${REST_PORT}/v1/system/init"
+  local_curl_args=(-ksS)
+else
+  local_ready_url="http://127.0.0.1:\${REST_PORT}/readyz"
+  local_init_url="http://127.0.0.1:\${REST_PORT}/v1/system/init"
+  local_curl_args=(-fsS)
+fi
 
-      for _ in \$(seq 1 60); do
-        if curl "\${local_curl_args[@]}" -o /dev/null "\${local_ready_url}" >/dev/null 2>&1; then
-          break
-        fi
-        sleep 5
-      done
+for _ in \$(seq 1 60); do
+  if curl "\${local_curl_args[@]}" -o /dev/null "\${local_ready_url}" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 5
+done
 
-      init_response="\$(curl "\${local_curl_args[@]}" -X POST "\${local_init_url}")"
-      export INIT_RESPONSE="\${init_response}"
-      eval "\$(
-        python3 - <<'PY'
+init_response="\$(curl "\${local_curl_args[@]}" -X POST "\${local_init_url}")"
+export INIT_RESPONSE="\${init_response}"
+eval "\$(
+  python3 - <<'PY'
 import json
 import os
 import shlex
@@ -908,20 +908,20 @@ payload = {
 for key, value in payload.items():
     print(f"{key}={shlex.quote(str(value))}")
 PY
-      )"
+)"
 
-      if [ "\${ENABLE_PUBLIC_PROXY}" = "true" ]; then
-        write_status CONFIGURING_PROXY "configuring public HTTPS proxy"
-        apt-get install -y caddy
-        mkdir -p /etc/caddy
-        cat >/etc/caddy/Caddyfile <<'CADDYFILE'
+if [ "\${ENABLE_PUBLIC_PROXY}" = "true" ]; then
+  write_status CONFIGURING_PROXY "configuring public HTTPS proxy"
+  apt-get install -y caddy
+  mkdir -p /etc/caddy
+  cat >/etc/caddy/Caddyfile <<'CADDYFILE'
 {
   admin off
 CADDYFILE
-        if [ -n "\${CONTACT_EMAIL}" ]; then
-          printf '  email %s\n' "\${CONTACT_EMAIL}" >> /etc/caddy/Caddyfile
-        fi
-        cat >>/etc/caddy/Caddyfile <<CADDYFILE
+  if [ -n "\${CONTACT_EMAIL}" ]; then
+    printf '  email %s\n' "\${CONTACT_EMAIL}" >> /etc/caddy/Caddyfile
+  fi
+  cat >>/etc/caddy/Caddyfile <<CADDYFILE
 }
 
 \${PUBLIC_DOMAIN} {
@@ -937,13 +937,13 @@ CADDYFILE
   }
 }
 CADDYFILE
-        caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
-        systemctl enable caddy
-        systemctl restart caddy
-      fi
+  caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+  systemctl enable caddy
+  systemctl restart caddy
+fi
 
-      export ROOT_API_KEY INIT_ALREADY INIT_MESSAGE STATUS_FILE REST_PORT APP_GRPC_PORT PUBLIC_GRPC_PORT
-      python3 - <<'PY'
+export ROOT_API_KEY INIT_ALREADY INIT_MESSAGE STATUS_FILE REST_PORT APP_GRPC_PORT PUBLIC_GRPC_PORT
+python3 - <<'PY'
 import json
 import os
 import pathlib
@@ -961,6 +961,19 @@ payload = {
 }
 path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 PY
+EOF
+
+  bootstrap_b64="$(base64 "$bootstrap_script_file" | tr -d '\n')"
+  USER_DATA_FILE="$(mktemp "${TMP_DIR}/hetzner-user-data-XXXX.yaml")"
+  cat >"$USER_DATA_FILE" <<EOF
+#cloud-config
+package_update: true
+write_files:
+  - path: /root/goodmem-hetzner-bootstrap.sh
+    permissions: '0700'
+    owner: root:root
+    encoding: b64
+    content: ${bootstrap_b64}
 runcmd:
   - [bash, /root/goodmem-hetzner-bootstrap.sh]
 EOF
@@ -981,6 +994,7 @@ ensure_server() {
     --location "$LOCATION" \
     --ssh-key "$SSH_KEY_NAME" \
     --firewall "$FIREWALL_NAME" \
+    --volume "$VOLUME_NAME" \
     --user-data-from-file "$USER_DATA_FILE" >/dev/null
   refresh_server_metadata
 }
@@ -988,7 +1002,7 @@ ensure_server() {
 ensure_volume_attached() {
   local volume_json attached_to
   volume_json="$("$HCLOUD_BIN" volume describe "$VOLUME_NAME" -o json)"
-  attached_to="$(printf '%s' "$volume_json" | json_field '",".join(str(item.get("server")) for item in data.get("volume", data).get("server", []) if isinstance(item, dict) and item.get("server")) if isinstance(data.get("volume", data).get("server"), list) else ""' 2>/dev/null || true)"
+  attached_to="$(json_field '",".join(str(item.get("server")) for item in data.get("volume", data).get("server", []) if isinstance(item, dict) and item.get("server")) if isinstance(data.get("volume", data).get("server"), list) else ""' "$volume_json" 2>/dev/null || true)"
   if [ -n "$attached_to" ] && [[ ",${attached_to}," == *",${SERVER_ID},"* ]]; then
     return
   fi
@@ -1045,7 +1059,7 @@ PY
 delete_dns_rrset() {
   [ -n "$DNS_ZONE_NAME" ] || return
   [ -n "$DNS_RECORD_NAME" ] || return
-  "$HCLOUD_BIN" zone rrset delete "$DNS_ZONE_NAME" --name "$DNS_RECORD_NAME" --type A >/dev/null 2>&1 || true
+  "$HCLOUD_BIN" zone rrset delete "$DNS_ZONE_NAME" "$DNS_RECORD_NAME" A >/dev/null 2>&1 || true
 }
 
 upsert_dns_rrset() {
@@ -1118,8 +1132,8 @@ wait_for_bootstrap_ready() {
   while [ "$(date +%s)" -lt "$deadline" ]; do
     status_json="$(fetch_remote_status)"
     if [ -n "$status_json" ]; then
-      state="$(printf '%s' "$status_json" | json_field 'data.get("state", "")' 2>/dev/null || true)"
-      message="$(printf '%s' "$status_json" | json_field 'data.get("message", "")' 2>/dev/null || true)"
+      state="$(json_field 'data.get("state", "")' "$status_json" 2>/dev/null || true)"
+      message="$(json_field 'data.get("message", "")' "$status_json" 2>/dev/null || true)"
       if [ -n "$state" ] && [ "$state" != "$last_state" ]; then
         log "Remote bootstrap state: ${state}${message:+ - ${message}}"
         last_state="$state"
@@ -1128,9 +1142,9 @@ wait_for_bootstrap_ready() {
         die "Remote bootstrap failed: ${message:-unknown failure}"
       fi
       if [ "$state" = "READY" ]; then
-        ROOT_API_KEY="$(printf '%s' "$status_json" | json_field 'data.get("api_key", "")' 2>/dev/null || true)"
-        INIT_ALREADY="$(printf '%s' "$status_json" | json_field 'data.get("init_already", "")' 2>/dev/null || true)"
-        INIT_MESSAGE="$(printf '%s' "$status_json" | json_field 'data.get("init_message", "")' 2>/dev/null || true)"
+        ROOT_API_KEY="$(json_field 'data.get("api_key", "")' "$status_json" 2>/dev/null || true)"
+        INIT_ALREADY="$(json_field 'data.get("init_already", "")' "$status_json" 2>/dev/null || true)"
+        INIT_MESSAGE="$(json_field 'data.get("init_message", "")' "$status_json" 2>/dev/null || true)"
         return
       fi
     fi
@@ -1224,7 +1238,7 @@ EOF
     cat <<EOF
 
 Direct access:
-- REST: https://${INSTANCE_IP}:${DIRECT_REST_PORT}
+- REST: http://${INSTANCE_IP}:${DIRECT_REST_PORT}
 - gRPC: https://${INSTANCE_IP}:${DIRECT_GRPC_PORT}
 - Access is restricted to ${ACCESS_CIDR}
 EOF
@@ -1256,9 +1270,9 @@ EOF
     cat <<EOF
 
 Endpoints:
-- REST: https://${INSTANCE_IP}:${DIRECT_REST_PORT}
+- REST: http://${INSTANCE_IP}:${DIRECT_REST_PORT}
 - gRPC: https://${INSTANCE_IP}:${DIRECT_GRPC_PORT}
-- Note: self-signed TLS; clients should use -k / insecure mode for first-time testing.
+- Note: REST is plain HTTP in no-domain mode; gRPC remains TLS on 50051.
 EOF
   fi
 
@@ -1339,7 +1353,7 @@ PY
     server_state="unknown"
     volume_state="unknown"
     if command -v "$HCLOUD_BIN" >/dev/null 2>&1; then
-      server_state="$("$HCLOUD_BIN" server describe "$SERVER_NAME" -o json 2>/dev/null | json_field 'data.get("server", data).get("status")' 2>/dev/null || echo missing)"
+      server_state="$(json_field 'data.get("server", data).get("status")' "$("$HCLOUD_BIN" server describe "$SERVER_NAME" -o json 2>/dev/null || true)" 2>/dev/null || echo missing)"
       if "$HCLOUD_BIN" volume describe "$VOLUME_NAME" -o json >/dev/null 2>&1; then
         volume_state="present"
       else
@@ -1423,6 +1437,7 @@ fi
 
 require_cmd "$HCLOUD_BIN" "https://github.com/hetznercloud/cli"
 require_cmd curl
+require_cmd base64
 require_cmd openssl
 require_cmd python3
 require_cmd ssh
