@@ -22,6 +22,7 @@ PROFILE_NAME="hetzner"
 ACCESS_CIDR=""
 ACCESS_CIDR_SET=false
 DOMAIN=""
+AUTO_SSLIP_DOMAIN=false
 CONTACT_EMAIL=""
 IMAGE="ghcr.io/pair-systems-inc/goodmem/server:latest"
 WAIT_FOR_READY=true
@@ -31,9 +32,7 @@ WAIT_INTERVAL=5
 PUBLIC_REST_PORT=443
 PUBLIC_GRPC_PORT=50051
 INTERNAL_REST_PORT=8080
-DIRECT_REST_PORT=8080
-DIRECT_GRPC_PORT=50051
-DOMAIN_GRPC_PORT=9090
+INTERNAL_GRPC_PORT=9090
 
 HCLOUD_BIN="hcloud"
 STATE_ROOT="${HOME}/.goodmem"
@@ -81,13 +80,13 @@ Options:
   --delete-volume           Also delete the Postgres data volume on destroy
   --yes                     Confirm destructive actions
   --location CODE           Hetzner location (prompts if unset, defaults to hil)
-  --tier NAME               Size tier: small, medium, large, x-large, 2x-large, or 4x-large
+  --tier NAME               Size tier: large, x-large, or 2x-large (prompts if unset)
   --server-type TYPE        Explicit Hetzner server type (overrides --tier)
   --volume-size GB          Postgres volume size in GB (default: 10)
   --db-password PASS        Postgres password (generated if omitted)
   --profile-name NAME       GoodMem CLI profile name (default: hetzner)
-  --access-cidr CIDR        CIDR for SSH/direct access (auto-detected if omitted)
-  --domain DOMAIN           Public domain for HTTPS + gRPC (Caddy)
+  --access-cidr CIDR        CIDR for SSH access (auto-detected if omitted)
+  --domain DOMAIN           Public domain for HTTPS + gRPC (defaults to auto-generated sslip.io hostname)
   --email EMAIL             Contact email for ACME/TLS
   --image IMAGE             GoodMem server image
   --no-wait                 Exit after provisioning
@@ -267,22 +266,6 @@ location_label() {
 
 apply_tier_defaults() {
   case "$SIZE_TIER" in
-    small)
-      if [ "$SERVER_TYPE_SET" != "true" ]; then
-        case "$(market_for_location "$LOCATION")" in
-          eu) SERVER_TYPE="cx23" ;;
-          *) SERVER_TYPE="cpx21" ;;
-        esac
-      fi
-      ;;
-    medium)
-      if [ "$SERVER_TYPE_SET" != "true" ]; then
-        case "$(market_for_location "$LOCATION")" in
-          eu) SERVER_TYPE="cx33" ;;
-          *) SERVER_TYPE="cpx31" ;;
-        esac
-      fi
-      ;;
     large)
       if [ "$SERVER_TYPE_SET" != "true" ]; then
         case "$(market_for_location "$LOCATION")" in
@@ -293,21 +276,19 @@ apply_tier_defaults() {
       ;;
     x-large)
       if [ "$SERVER_TYPE_SET" != "true" ]; then
-        SERVER_TYPE="ccx23"
+        case "$(market_for_location "$LOCATION")" in
+          eu) SERVER_TYPE="cx53" ;;
+          *) SERVER_TYPE="cpx51" ;;
+        esac
       fi
       ;;
     2x-large)
-      if [ "$SERVER_TYPE_SET" != "true" ]; then
-        SERVER_TYPE="ccx33"
-      fi
-      ;;
-    4x-large)
       if [ "$SERVER_TYPE_SET" != "true" ]; then
         SERVER_TYPE="ccx43"
       fi
       ;;
     *)
-      die "Unsupported tier: $SIZE_TIER (expected: small, medium, large, x-large, 2x-large, or 4x-large)"
+      die "Unsupported tier: $SIZE_TIER (expected: large, x-large, or 2x-large)"
       ;;
   esac
 }
@@ -317,18 +298,12 @@ tier_summary() {
   local market
   market="$(market_for_location "$LOCATION")"
   case "$tier:$market" in
-    small:eu) printf '4 GB RAM, 2 shared vCPU, about $5/mo + self-hosted Postgres' ;;
-    medium:eu) printf '8 GB RAM, 4 shared vCPU, about $8/mo + self-hosted Postgres' ;;
-    large:eu) printf '16 GB RAM, 8 shared vCPU, about $14/mo + self-hosted Postgres' ;;
-    x-large:eu) printf '16 GB RAM, 4 dedicated vCPU, about $37/mo + self-hosted Postgres' ;;
-    2x-large:eu) printf '32 GB RAM, 8 dedicated vCPU, about $73/mo + self-hosted Postgres' ;;
-    4x-large:eu) printf '64 GB RAM, 16 dedicated vCPU, about $147/mo + self-hosted Postgres' ;;
-    small:*) printf '4 GB RAM, 3 shared vCPU, about $12/mo + self-hosted Postgres' ;;
-    medium:*) printf '8 GB RAM, 4 shared vCPU, about $21/mo + self-hosted Postgres' ;;
-    large:*) printf '16 GB RAM, 8 shared vCPU, about $39/mo + self-hosted Postgres' ;;
-    x-large:*) printf '16 GB RAM, 4 dedicated vCPU, about $34/mo + self-hosted Postgres' ;;
-    2x-large:*) printf '32 GB RAM, 8 dedicated vCPU, about $65/mo + self-hosted Postgres' ;;
-    4x-large:*) printf '64 GB RAM, 16 dedicated vCPU, about $130/mo + self-hosted Postgres' ;;
+    large:eu) printf '16 GB RAM, GoodMem 6 GB, Postgres 8 GB, system 2 GB, server about $10/mo + volume' ;;
+    x-large:eu) printf '32 GB RAM, GoodMem 8 GB, Postgres 20 GB, system 4 GB, server about $19/mo + volume' ;;
+    2x-large:eu) printf '64 GB RAM, GoodMem 8 GB, Postgres 52 GB, system 4 GB, server about $107/mo + volume' ;;
+    large:*) printf '16 GB RAM, GoodMem 6 GB, Postgres 8 GB, system 2 GB, server about $33/mo + volume' ;;
+    x-large:*) printf '32 GB RAM, GoodMem 8 GB, Postgres 20 GB, system 4 GB, server about $67/mo + volume' ;;
+    2x-large:*) printf '64 GB RAM, GoodMem 8 GB, Postgres 52 GB, system 4 GB, server about $111/mo + volume' ;;
     *)
       printf '%s' "$tier"
       ;;
@@ -397,10 +372,10 @@ prompt_location() {
 prompt_tier() {
   local tty_input=""
   local choice=""
-  local prompt='Enter selection (1-6) or name [small]: '
+  local prompt='Enter selection (1-3) or name [large]: '
 
   default_tier() {
-    SIZE_TIER="small"
+    SIZE_TIER="large"
     TIER_SET=true
     apply_tier_defaults
     log "$1 defaulting Hetzner tier to ${SIZE_TIER} ($(tier_summary "$SIZE_TIER"))."
@@ -416,12 +391,9 @@ prompt_tier() {
   fi
 
   echo "Select Hetzner instance tier:"
-  echo "  1) small    - $(tier_summary small)"
-  echo "  2) medium   - $(tier_summary medium)"
-  echo "  3) large    - $(tier_summary large)"
-  echo "  4) x-large  - $(tier_summary x-large)"
-  echo "  5) 2x-large - $(tier_summary 2x-large)"
-  echo "  6) 4x-large - $(tier_summary 4x-large)"
+  echo "  1) large    - $(tier_summary large)"
+  echo "  2) x-large  - $(tier_summary x-large)"
+  echo "  3) 2x-large - $(tier_summary 2x-large)"
 
   while true; do
     if [ -n "$tty_input" ]; then
@@ -436,14 +408,11 @@ prompt_tier() {
       fi
     fi
     choice="$(printf '%s' "$choice" | tr '[:upper:]' '[:lower:]')"
-    [ -z "$choice" ] && choice="small"
+    [ -z "$choice" ] && choice="large"
     case "$choice" in
-      1|small) SIZE_TIER="small" ;;
-      2|medium) SIZE_TIER="medium" ;;
-      3|large) SIZE_TIER="large" ;;
-      4|x-large|xlarge) SIZE_TIER="x-large" ;;
-      5|2x-large|2xlarge) SIZE_TIER="2x-large" ;;
-      6|4x-large|4xlarge) SIZE_TIER="4x-large" ;;
+      1|large) SIZE_TIER="large" ;;
+      2|x-large|xlarge) SIZE_TIER="x-large" ;;
+      3|2x-large|2xlarge) SIZE_TIER="2x-large" ;;
       *)
         echo "Invalid selection."
         continue
@@ -503,6 +472,7 @@ path = pathlib.Path(sys.argv[1])
 data = json.loads(path.read_text())
 mapping = {
     "LOCATION": data.get("location", ""),
+    "SIZE_TIER": data.get("size_tier", ""),
     "SERVER_TYPE": data.get("server_type", ""),
     "INSTANCE_IP": data.get("server_ip", ""),
     "VOLUME_ID": str(data.get("volume_id", "")),
@@ -515,6 +485,8 @@ mapping = {
 }
 for key, value in mapping.items():
     print(f"{key}={shlex.quote(value)}")
+if data.get("dns_mode_used") == "sslip":
+    print("AUTO_SSLIP_DOMAIN=true")
 PY
   )"
 }
@@ -530,6 +502,7 @@ path = pathlib.Path(sys.argv[1])
 payload = {
     "deployment_name": os.environ["DEPLOYMENT_NAME"],
     "location": os.environ.get("LOCATION", ""),
+    "size_tier": os.environ.get("SIZE_TIER", ""),
     "server_type": os.environ.get("SERVER_TYPE", ""),
     "server_name": os.environ.get("SERVER_NAME", ""),
     "server_ip": os.environ.get("INSTANCE_IP", ""),
@@ -559,13 +532,52 @@ auto_detect_access_cidr() {
     log "Using access CIDR ${ACCESS_CIDR} from public IP autodetect."
   else
     ACCESS_CIDR="0.0.0.0/0"
-    warn "Could not autodetect public IP; defaulting SSH/direct access to ${ACCESS_CIDR}."
+    warn "Could not autodetect public IP; defaulting SSH access to ${ACCESS_CIDR}."
   fi
+}
+
+sslip_domain_for_ip() {
+  local ip="$1"
+  printf '%s.sslip.io' "${ip//./-}"
 }
 
 validate_hcloud_auth() {
   if ! "$HCLOUD_BIN" location list -o json >/dev/null 2>&1; then
     die "hcloud CLI is not authenticated or HCLOUD_TOKEN is missing."
+  fi
+}
+
+run_hcloud_quiet() {
+  local output=""
+  if ! output="$("$HCLOUD_BIN" "$@" 2>&1)"; then
+    [ -n "$output" ] && printf '%s\n' "$output" >&2
+    return 1
+  fi
+}
+
+selected_tier_label() {
+  if [ -n "$SIZE_TIER" ]; then
+    printf '%s (%s)' "$SIZE_TIER" "$(tier_summary "$SIZE_TIER")"
+  else
+    printf 'custom server type (%s)' "$SERVER_TYPE"
+  fi
+}
+
+validate_server_type_memory() {
+  local server_type_json=""
+  local memory_gb=""
+
+  server_type_json="$("$HCLOUD_BIN" server-type describe "$SERVER_TYPE" -o json 2>/dev/null || true)"
+  if [ -z "$server_type_json" ]; then
+    die "Hetzner server type not found: ${SERVER_TYPE}"
+  fi
+
+  memory_gb="$(json_field 'data.get("server_type", data).get("memory")' "$server_type_json" 2>/dev/null || true)"
+  if [ -z "$memory_gb" ]; then
+    die "Could not determine RAM for Hetzner server type ${SERVER_TYPE}."
+  fi
+  if [ "$memory_gb" -lt 16 ]; then
+    die "Hetzner server type ${SERVER_TYPE} has ${memory_gb} GB RAM; GoodMem requires at least 16 GB in this bootstrap."
   fi
 }
 
@@ -631,29 +643,20 @@ ensure_firewall() {
   fi
 
   log "Creating firewall ${FIREWALL_NAME}..."
-  "$HCLOUD_BIN" firewall create --name "$FIREWALL_NAME" >/dev/null
-  "$HCLOUD_BIN" firewall add-rule "$FIREWALL_NAME" \
+  run_hcloud_quiet firewall create --name "$FIREWALL_NAME"
+  run_hcloud_quiet firewall add-rule "$FIREWALL_NAME" \
     --direction in --protocol tcp --port 22 \
-    --source-ips "$ACCESS_CIDR" >/dev/null
-
-  if [ -n "$DOMAIN" ]; then
-    "$HCLOUD_BIN" firewall add-rule "$FIREWALL_NAME" \
-      --direction in --protocol tcp --port 80 \
-      --source-ips 0.0.0.0/0 --source-ips ::/0 >/dev/null
-    "$HCLOUD_BIN" firewall add-rule "$FIREWALL_NAME" \
-      --direction in --protocol tcp --port 443 \
-      --source-ips 0.0.0.0/0 --source-ips ::/0 >/dev/null
-    "$HCLOUD_BIN" firewall add-rule "$FIREWALL_NAME" \
-      --direction in --protocol tcp --port "$PUBLIC_GRPC_PORT" \
-      --source-ips 0.0.0.0/0 --source-ips ::/0 >/dev/null
-  else
-    "$HCLOUD_BIN" firewall add-rule "$FIREWALL_NAME" \
-      --direction in --protocol tcp --port "$DIRECT_REST_PORT" \
-      --source-ips "$ACCESS_CIDR" >/dev/null
-    "$HCLOUD_BIN" firewall add-rule "$FIREWALL_NAME" \
-      --direction in --protocol tcp --port "$DIRECT_GRPC_PORT" \
-      --source-ips "$ACCESS_CIDR" >/dev/null
-  fi
+    --source-ips "$ACCESS_CIDR"
+  run_hcloud_quiet firewall add-rule "$FIREWALL_NAME" \
+    --direction in --protocol tcp --port 80 \
+    --source-ips 0.0.0.0/0 --source-ips ::/0
+  run_hcloud_quiet firewall add-rule "$FIREWALL_NAME" \
+    --direction in --protocol tcp --port 443 \
+    --source-ips 0.0.0.0/0 --source-ips ::/0
+  run_hcloud_quiet firewall add-rule "$FIREWALL_NAME" \
+    --direction in --protocol tcp --port "$PUBLIC_GRPC_PORT" \
+    --source-ips 0.0.0.0/0 --source-ips ::/0
+  log "Firewall ${FIREWALL_NAME} configured."
 }
 
 ensure_volume() {
@@ -671,34 +674,15 @@ ensure_volume() {
 }
 
 bootstrap_app_grpc_port() {
-  if [ -n "$DOMAIN" ]; then
-    printf '%s' "$DOMAIN_GRPC_PORT"
-  else
-    printf '%s' "$DIRECT_GRPC_PORT"
-  fi
+  printf '%s' "$INTERNAL_GRPC_PORT"
 }
 
 write_user_data_file() {
   local app_grpc_port
-  local enable_public_proxy
-  local app_bind_host
-  local rest_tls_enabled
-  local grpc_tls_enabled
   local bootstrap_script_file
   local bootstrap_b64
 
   app_grpc_port="$(bootstrap_app_grpc_port)"
-  if [ -n "$DOMAIN" ]; then
-    enable_public_proxy="true"
-    app_bind_host="127.0.0.1"
-    rest_tls_enabled="false"
-    grpc_tls_enabled="false"
-  else
-    enable_public_proxy="false"
-    app_bind_host="0.0.0.0"
-    rest_tls_enabled="false"
-    grpc_tls_enabled="true"
-  fi
 
   bootstrap_script_file="$(mktemp "${TMP_DIR}/hetzner-bootstrap-XXXX.sh")"
   cat >"$bootstrap_script_file" <<EOF
@@ -716,15 +700,11 @@ DB_NAME="goodmem"
 DB_PASSWORD="${DB_PASSWORD}"
 PUBLIC_DOMAIN="${DOMAIN}"
 CONTACT_EMAIL="${CONTACT_EMAIL}"
-ENABLE_PUBLIC_PROXY="${enable_public_proxy}"
 VOLUME_DEV="/dev/disk/by-id/scsi-0HC_Volume_${VOLUME_ID}"
 MOUNT_POINT="/mnt/pgdata"
 REST_PORT=${INTERNAL_REST_PORT}
 APP_GRPC_PORT=${app_grpc_port}
 PUBLIC_GRPC_PORT=${PUBLIC_GRPC_PORT}
-APP_BIND_HOST="${app_bind_host}"
-REST_TLS_ENABLED="${rest_tls_enabled}"
-GRPC_TLS_ENABLED="${grpc_tls_enabled}"
 PROFILE_NAME="${PROFILE_NAME}"
 
 mkdir -p "\${STATUS_DIR}"
@@ -753,18 +733,19 @@ trap 'write_status FAILED "command failed at line \$LINENO: \$BASH_COMMAND"' ERR
 write_status STARTING "bootstrap started"
 
 total_mb=\$(awk '/MemTotal:/ {print int(\$2/1024)}' /proc/meminfo)
-os_reserve=\$(( total_mb * 15 / 100 ))
-[ "\${os_reserve}" -lt 384 ] && os_reserve=384
-[ "\${os_reserve}" -gt 2048 ] && os_reserve=2048
-available_mb=\$(( total_mb - os_reserve ))
-goodmem_mb=\$(( available_mb * 30 / 100 ))
-postgres_mb=\$(( available_mb - goodmem_mb ))
-jvm_ram_pct=70
-if [ "\${goodmem_mb}" -lt 768 ]; then
-  jvm_ram_pct=50
-elif [ "\${goodmem_mb}" -lt 1536 ]; then
-  jvm_ram_pct=65
+if [ "\${total_mb}" -ge 32768 ]; then
+  goodmem_mb=8192
+  os_reserve=4096
+else
+  goodmem_mb=6144
+  os_reserve=2048
 fi
+postgres_mb=\$(( total_mb - goodmem_mb - os_reserve ))
+if [ "\${postgres_mb}" -lt 4096 ]; then
+  echo "not enough RAM available for PostgreSQL after reservation: total=\${total_mb} goodmem=\${goodmem_mb} os=\${os_reserve}" >&2
+  exit 1
+fi
+jvm_ram_pct=70
 shared_buffers_mb=\$(( postgres_mb * 25 / 100 ))
 [ "\${shared_buffers_mb}" -lt 128 ] && shared_buffers_mb=128
 [ "\${shared_buffers_mb}" -gt 8192 ] && shared_buffers_mb=8192
@@ -780,6 +761,18 @@ maint_mem_mb=64
 [ "\${postgres_mb}" -ge 8192 ] && maint_mem_mb=512
 [ "\${postgres_mb}" -ge 16384 ] && maint_mem_mb=1024
 [ "\${postgres_mb}" -ge 32768 ] && maint_mem_mb=2048
+
+if [ -z "\${PUBLIC_DOMAIN}" ]; then
+  public_ip="\$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i <= NF; i++) if (\$i == "src") { print \$(i + 1); exit }}')"
+  if [ -z "\${public_ip}" ]; then
+    public_ip="\$(curl -fsSL https://checkip.amazonaws.com | tr -d '[:space:]')"
+  fi
+  if [ -z "\${public_ip}" ]; then
+    echo "could not determine server public IP for sslip.io hostname" >&2
+    exit 1
+  fi
+  PUBLIC_DOMAIN="\${public_ip//./-}.sslip.io"
+fi
 
 swap_mb=1024
 [ "\${total_mb}" -gt 8192 ] && swap_mb=2048
@@ -849,13 +842,8 @@ docker exec -e PGPASSWORD="\${DB_PASSWORD}" "\${DB_CONTAINER}" \
   psql -U "\${DB_USER}" -d "\${DB_NAME}" -c 'CREATE EXTENSION IF NOT EXISTS vector;' >/dev/null
 
 write_status STARTING_GOODMEM "starting GoodMem"
-if [ "\${APP_BIND_HOST}" = "127.0.0.1" ]; then
-  rest_publish="127.0.0.1:\${REST_PORT}:\${REST_PORT}"
-  grpc_publish="127.0.0.1:\${APP_GRPC_PORT}:\${APP_GRPC_PORT}"
-else
-  rest_publish="\${REST_PORT}:\${REST_PORT}"
-  grpc_publish="\${APP_GRPC_PORT}:\${APP_GRPC_PORT}"
-fi
+rest_publish="127.0.0.1:\${REST_PORT}:\${REST_PORT}"
+grpc_publish="127.0.0.1:\${APP_GRPC_PORT}:\${APP_GRPC_PORT}"
 
 docker run -d \
   --name "\${APP_CONTAINER}" \
@@ -865,8 +853,8 @@ docker run -d \
   -p "\${rest_publish}" \
   -p "\${grpc_publish}" \
   -e PORT="\${REST_PORT}" \
-  -e GOODMEM_REST_TLS_ENABLED="\${REST_TLS_ENABLED}" \
-  -e GOODMEM_GRPC_TLS_ENABLED="\${GRPC_TLS_ENABLED}" \
+  -e GOODMEM_REST_TLS_ENABLED="false" \
+  -e GOODMEM_GRPC_TLS_ENABLED="false" \
   -e GOODMEM_GRPC_PORT="\${APP_GRPC_PORT}" \
   -e DB_URL="jdbc:postgresql://\${DB_CONTAINER}:5432/\${DB_NAME}?sslmode=disable" \
   -e DB_USER="\${DB_USER}" \
@@ -874,15 +862,9 @@ docker run -d \
   -e JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=\${jvm_ram_pct} -XX:InitialRAMPercentage=25" \
   "\${GOODMEM_IMAGE}" >/dev/null
 
-if [ "\${REST_TLS_ENABLED}" = "true" ]; then
-  local_ready_url="https://127.0.0.1:\${REST_PORT}/readyz"
-  local_init_url="https://127.0.0.1:\${REST_PORT}/v1/system/init"
-  local_curl_args=(-ksS)
-else
-  local_ready_url="http://127.0.0.1:\${REST_PORT}/readyz"
-  local_init_url="http://127.0.0.1:\${REST_PORT}/v1/system/init"
-  local_curl_args=(-fsS)
-fi
+local_ready_url="http://127.0.0.1:\${REST_PORT}/readyz"
+local_init_url="http://127.0.0.1:\${REST_PORT}/v1/system/init"
+local_curl_args=(-fsS)
 
 for _ in \$(seq 1 60); do
   if curl "\${local_curl_args[@]}" -o /dev/null "\${local_ready_url}" >/dev/null 2>&1; then
@@ -910,18 +892,17 @@ for key, value in payload.items():
 PY
 )"
 
-if [ "\${ENABLE_PUBLIC_PROXY}" = "true" ]; then
-  write_status CONFIGURING_PROXY "configuring public HTTPS proxy"
-  apt-get install -y caddy
-  mkdir -p /etc/caddy
-  cat >/etc/caddy/Caddyfile <<'CADDYFILE'
+write_status CONFIGURING_PROXY "configuring public HTTPS proxy"
+apt-get install -y caddy
+mkdir -p /etc/caddy
+cat >/etc/caddy/Caddyfile <<'CADDYFILE'
 {
   admin off
 CADDYFILE
-  if [ -n "\${CONTACT_EMAIL}" ]; then
-    printf '  email %s\n' "\${CONTACT_EMAIL}" >> /etc/caddy/Caddyfile
-  fi
-  cat >>/etc/caddy/Caddyfile <<CADDYFILE
+if [ -n "\${CONTACT_EMAIL}" ]; then
+  printf '  email %s\n' "\${CONTACT_EMAIL}" >> /etc/caddy/Caddyfile
+fi
+cat >>/etc/caddy/Caddyfile <<CADDYFILE
 }
 
 \${PUBLIC_DOMAIN} {
@@ -937,10 +918,9 @@ CADDYFILE
   }
 }
 CADDYFILE
-  caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
-  systemctl enable caddy
-  systemctl restart caddy
-fi
+caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+systemctl enable caddy
+systemctl restart caddy
 
 export ROOT_API_KEY INIT_ALREADY INIT_MESSAGE STATUS_FILE REST_PORT APP_GRPC_PORT PUBLIC_GRPC_PORT
 python3 - <<'PY'
@@ -1000,14 +980,14 @@ ensure_server() {
 }
 
 ensure_volume_attached() {
-  local volume_json attached_to
-  volume_json="$("$HCLOUD_BIN" volume describe "$VOLUME_NAME" -o json)"
-  attached_to="$(json_field '",".join(str(item.get("server")) for item in data.get("volume", data).get("server", []) if isinstance(item, dict) and item.get("server")) if isinstance(data.get("volume", data).get("server"), list) else ""' "$volume_json" 2>/dev/null || true)"
-  if [ -n "$attached_to" ] && [[ ",${attached_to}," == *",${SERVER_ID},"* ]]; then
+  local server_json attached_volumes
+  server_json="$("$HCLOUD_BIN" server describe "$SERVER_NAME" -o json)"
+  attached_volumes="$(json_field '",".join(str(item) for item in data.get("server", data).get("volumes", []) if item is not None)' "$server_json" 2>/dev/null || true)"
+  if [ -n "$attached_volumes" ] && [[ ",${attached_volumes}," == *",${VOLUME_ID},"* ]]; then
     return
   fi
   log "Attaching volume ${VOLUME_NAME} to ${SERVER_NAME}..."
-  "$HCLOUD_BIN" volume attach "$VOLUME_NAME" --server "$SERVER_NAME" >/dev/null || true
+  run_hcloud_quiet volume attach "$VOLUME_NAME" --server "$SERVER_NAME"
 }
 
 relative_record_name() {
@@ -1021,7 +1001,7 @@ relative_record_name() {
 }
 
 find_dns_zone_for_domain() {
-  if [ -z "$DOMAIN" ]; then
+  if [ -z "$DOMAIN" ] || [ "$AUTO_SSLIP_DOMAIN" = true ]; then
     return
   fi
 
@@ -1066,6 +1046,14 @@ upsert_dns_rrset() {
   if [ -z "$DOMAIN" ]; then
     return
   fi
+  if [ "$AUTO_SSLIP_DOMAIN" = true ]; then
+    DNS_ZONE_NAME=""
+    DNS_RECORD_NAME=""
+    DNS_MODE_USED="sslip"
+    return
+  fi
+  DNS_ZONE_NAME=""
+  DNS_RECORD_NAME=""
   find_dns_zone_for_domain
   if [ -z "$DNS_ZONE_NAME" ]; then
     DNS_MODE_USED="manual"
@@ -1081,6 +1069,15 @@ upsert_dns_rrset() {
     --type A \
     --record "$INSTANCE_IP" >/dev/null
   DNS_MODE_USED="hetzner"
+}
+
+finalize_public_domain() {
+  if [ -n "$DOMAIN" ]; then
+    return
+  fi
+  DOMAIN="$(sslip_domain_for_ip "$INSTANCE_IP")"
+  AUTO_SSLIP_DOMAIN=true
+  DNS_MODE_USED="sslip"
 }
 
 wait_for_running() {
@@ -1207,6 +1204,7 @@ Bootstrap started.
 Deployment:
 - Name: ${DEPLOYMENT_NAME}
 - Location: ${LOCATION} ($(location_label "$LOCATION"))
+- Tier: $(selected_tier_label)
 - Server type: ${SERVER_TYPE}
 - Server IP: ${INSTANCE_IP}
 - Volume: ${VOLUME_NAME}
@@ -1217,30 +1215,26 @@ State:
 
 Next:
 - Re-run this command without --no-wait to wait for readiness and print the API key.
+- Re-run: ./scripts/bootstrap_hetzner.sh --name ${DEPLOYMENT_NAME}
+- Destroy: ./scripts/bootstrap_hetzner.sh --destroy --name ${DEPLOYMENT_NAME} --delete-volume --yes
 EOF
 
-  if [ -n "$DOMAIN" ]; then
-    cat <<EOF
+  cat <<EOF
 
-DNS:
+Public endpoint:
 - Domain: ${DOMAIN}
 EOF
-    if [ "$DNS_MODE_USED" = "hetzner" ]; then
-      cat <<EOF
+  if [ "$DNS_MODE_USED" = "hetzner" ]; then
+    cat <<EOF
 - DNS was updated in Hetzner zone ${DNS_ZONE_NAME}.
 EOF
-    else
-      cat <<EOF
+  elif [ "$DNS_MODE_USED" = "manual" ]; then
+    cat <<EOF
 - Create this DNS record manually: A ${DOMAIN} -> ${INSTANCE_IP}
 EOF
-    fi
   else
     cat <<EOF
-
-Direct access:
-- REST: http://${INSTANCE_IP}:${DIRECT_REST_PORT}
-- gRPC: https://${INSTANCE_IP}:${DIRECT_GRPC_PORT}
-- Access is restricted to ${ACCESS_CIDR}
+- DNS is provided automatically by sslip.io from the server IP.
 EOF
   fi
 }
@@ -1252,6 +1246,7 @@ Bootstrap complete.
 Deployment:
 - Name: ${DEPLOYMENT_NAME}
 - Location: ${LOCATION} ($(location_label "$LOCATION"))
+- Tier: $(selected_tier_label)
 - Server type: ${SERVER_TYPE}
 - Server IP: ${INSTANCE_IP}
 - Volume: ${VOLUME_NAME}
@@ -1259,22 +1254,12 @@ Deployment:
 - SSH key: ${SSH_KEY_FILE}
 EOF
 
-  if [ -n "$DOMAIN" ]; then
-    cat <<EOF
+  cat <<EOF
 
 Endpoints:
 - REST: https://${DOMAIN}
 - gRPC: https://${DOMAIN}:${PUBLIC_GRPC_PORT}
 EOF
-  else
-    cat <<EOF
-
-Endpoints:
-- REST: http://${INSTANCE_IP}:${DIRECT_REST_PORT}
-- gRPC: https://${INSTANCE_IP}:${DIRECT_GRPC_PORT}
-- Note: REST is plain HTTP in no-domain mode; gRPC remains TLS on 50051.
-EOF
-  fi
 
   if [ -n "$INIT_MESSAGE" ]; then
     cat <<EOF
@@ -1294,20 +1279,19 @@ EOF
   fi
 
   if [ -n "$ROOT_API_KEY" ]; then
-    if [ -n "$DOMAIN" ]; then
-      cat <<EOF
+    cat <<EOF
 
 CLI example:
 - goodmem --server https://${DOMAIN}:${PUBLIC_GRPC_PORT} --api-key ${ROOT_API_KEY} system health
 EOF
-    else
-      cat <<EOF
-
-CLI example:
-- goodmem --server https://${INSTANCE_IP}:${DIRECT_GRPC_PORT} --api-key ${ROOT_API_KEY} system health
-EOF
-    fi
   fi
+
+  cat <<EOF
+
+Manage:
+- Re-run: ./scripts/bootstrap_hetzner.sh --name ${DEPLOYMENT_NAME}
+- Destroy: ./scripts/bootstrap_hetzner.sh --destroy --name ${DEPLOYMENT_NAME} --delete-volume --yes
+EOF
 }
 
 list_known_deployments() {
@@ -1340,6 +1324,7 @@ data = json.loads(path.read_text())
 fields = {
     "name": data.get("deployment_name", path.stem),
     "location": data.get("location", ""),
+    "size_tier": data.get("size_tier", ""),
     "domain": data.get("domain", ""),
     "server_name": data.get("server_name", ""),
     "volume_name": data.get("volume_name", ""),
@@ -1364,10 +1349,13 @@ PY
     cat <<EOF
 Name:       ${NAME}
 Location:   ${LOCATION:-"-"}
+Tier:       ${SIZE_TIER:-"custom"}$(if [ -n "${SIZE_TIER:-}" ]; then printf ' (%s)' "$(tier_summary "$SIZE_TIER")"; fi)
 Domain:     ${DOMAIN:-"-"}
 Server:     ${SERVER_NAME:-"-"} (${server_state})
 Volume:     ${VOLUME_NAME:-"-"} (${volume_state})
 State file: ${STATE_PATH}
+Re-run:     ./scripts/bootstrap_hetzner.sh --name ${NAME}
+Destroy:    ./scripts/bootstrap_hetzner.sh --destroy --name ${NAME} --delete-volume --yes
 
 EOF
   done
@@ -1458,6 +1446,7 @@ fi
 
 ensure_location
 ensure_tier
+validate_server_type_memory
 auto_detect_access_cidr
 [ -n "$DB_PASSWORD" ] || DB_PASSWORD="$(generate_password)"
 TMP_DIR="$(mktemp -d)"
@@ -1468,6 +1457,7 @@ ensure_volume
 ensure_server
 ensure_volume_attached
 refresh_server_metadata
+finalize_public_domain
 upsert_dns_rrset
 
 export DEPLOYMENT_NAME LOCATION SERVER_TYPE SERVER_NAME INSTANCE_IP VOLUME_NAME VOLUME_ID FIREWALL_NAME SSH_KEY_NAME DB_PASSWORD DOMAIN DNS_ZONE_NAME DNS_RECORD_NAME DNS_MODE_USED PROFILE_NAME
@@ -1482,18 +1472,16 @@ wait_for_running
 wait_for_ssh
 wait_for_bootstrap_ready
 
-if [ -n "$DOMAIN" ]; then
-  if wait_for_domain_resolution; then
-    if ! wait_for_public_https; then
-      warn "Public HTTPS did not become ready within ${WAIT_TIMEOUT}s. Caddy may still be waiting on ACME."
-    fi
-    if ! wait_for_public_grpc; then
-      warn "Public gRPC did not become ready within ${WAIT_TIMEOUT}s."
-    fi
-  else
-    warn "DNS for ${DOMAIN} did not resolve to ${INSTANCE_IP} within ${WAIT_TIMEOUT}s."
-    warn "Caddy on the instance will keep retrying certificate issuance after DNS is correct."
+if wait_for_domain_resolution; then
+  if ! wait_for_public_https; then
+    warn "Public HTTPS did not become ready within ${WAIT_TIMEOUT}s. Caddy may still be waiting on ACME."
   fi
+  if ! wait_for_public_grpc; then
+    warn "Public gRPC did not become ready within ${WAIT_TIMEOUT}s."
+  fi
+else
+  warn "DNS for ${DOMAIN} did not resolve to ${INSTANCE_IP} within ${WAIT_TIMEOUT}s."
+  warn "Caddy on the instance will keep retrying certificate issuance after DNS is correct."
 fi
 
 print_ready_summary
