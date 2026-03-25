@@ -340,6 +340,10 @@ apply_tier_defaults() {
   esac
 }
 
+tty_available() {
+  [ -t 0 ] || (: </dev/tty) >/dev/null 2>&1
+}
+
 prompt_tier() {
   local tty_input=""
   local summary=""
@@ -357,7 +361,7 @@ prompt_tier() {
 
   if [ -t 0 ]; then
     tty_input=""
-  elif [ -r /dev/tty ]; then
+  elif tty_available; then
     tty_input="/dev/tty"
   else
     default_tier_for_noninteractive "No TTY detected;"

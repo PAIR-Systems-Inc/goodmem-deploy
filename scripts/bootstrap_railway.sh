@@ -19,6 +19,7 @@ GRPC_PORT=50051
 SKIP_INIT=false
 SKIP_DOMAIN=false
 INSTALL_CLI=false
+HOSTED_RAILWAY_INSTALL_URL="https://get.goodmem.ai/railway"
 WAIT_FOR_READY=true
 READY_WAIT_TIMEOUT=120
 READY_WAIT_INTERVAL=5
@@ -181,13 +182,13 @@ retry() {
 }
 
 tty_available() {
-  [ -t 0 ] || [ -r /dev/tty ]
+  [ -t 0 ] || (: </dev/tty) >/dev/null 2>&1
 }
 
 run_with_tty() {
   if [ -t 0 ]; then
     "$@"
-  elif [ -r /dev/tty ]; then
+  elif tty_available; then
     "$@" </dev/tty
   else
     "$@"
@@ -209,7 +210,9 @@ ensure_cli() {
     fi
   else
     echo "railway CLI not found. Install it first: https://docs.railway.com/guides/cli" >&2
-    echo "Tip: re-run with --install-cli to auto-install via cli.new." >&2
+    echo "To auto-install the Railway CLI and continue:" >&2
+    echo "  curl -s ${HOSTED_RAILWAY_INSTALL_URL} | bash -s -- --install-cli" >&2
+    printf '  %s --install-cli\n' "$0" >&2
     exit 1
   fi
 

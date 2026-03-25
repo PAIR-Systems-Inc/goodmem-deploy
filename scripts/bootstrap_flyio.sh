@@ -29,6 +29,7 @@ POSTGRES_IMAGE="pgvector/pgvector:pg17"
 REST_PORT=8080
 GRPC_PORT=50051
 INSTALL_CLI=false
+HOSTED_FLYIO_INSTALL_URL="https://get.goodmem.ai/flyio"
 ROOT_API_KEY=""
 ROOT_USER_ID=""
 INIT_ALREADY=""
@@ -240,6 +241,20 @@ resolve_flyctl() {
   fi
 }
 
+tty_available() {
+  [ -t 0 ] || (: </dev/tty) >/dev/null 2>&1
+}
+
+run_with_tty() {
+  if [ -t 0 ]; then
+    "$@"
+  elif tty_available; then
+    "$@" </dev/tty
+  else
+    "$@"
+  fi
+}
+
 ensure_jq() {
   if command -v "$JQ_BIN" >/dev/null 2>&1; then
     return
@@ -290,7 +305,9 @@ ensure_cli() {
     fi
   else
     echo "flyctl not found. Install it first: https://fly.io/docs/flyctl/install/" >&2
-    echo "Tip: re-run with --install-cli to auto-install." >&2
+    echo "To auto-install flyctl and continue:" >&2
+    echo "  curl -s ${HOSTED_FLYIO_INSTALL_URL} | bash -s -- --install-cli" >&2
+    printf '  %s --install-cli\n' "$0" >&2
     exit 1
   fi
 
@@ -309,8 +326,8 @@ ensure_login() {
     return
   fi
 
-  if [ -t 0 ]; then
-    "$FLYCTL_BIN" auth login
+  if tty_available; then
+    run_with_tty "$FLYCTL_BIN" auth login
   else
     echo "Not logged in to Fly and no TTY available." >&2
     echo "Run 'flyctl auth login' interactively or set FLY_API_TOKEN." >&2
@@ -330,9 +347,13 @@ prompt_org_slug() {
     while [ -z "$choice" ]; do
       read -r -p "$prompt" choice
     done
-  elif [ -r /dev/tty ]; then
+  elif tty_available; then
     while [ -z "$choice" ]; do
-      read -r -p "$prompt" choice </dev/tty
+      if ! read -r -p "$prompt" choice </dev/tty; then
+        echo "Fly org must be specified when not running interactively." >&2
+        echo "Re-run with --org <slug> or set FLY_ORG." >&2
+        exit 1
+      fi
     done
   else
     echo "Fly org must be specified when not running interactively." >&2
@@ -417,7 +438,7 @@ ensure_org() {
   local tty_input=""
   if [ -t 0 ]; then
     tty_input=""
-  elif [ -r /dev/tty ]; then
+  elif tty_available; then
     tty_input="/dev/tty"
   else
     echo "Multiple Fly orgs detected but no --org was provided." >&2
@@ -435,7 +456,11 @@ ensure_org() {
   local choice=""
   while true; do
     if [ -n "$tty_input" ]; then
-      read -r -p "Enter selection (1-${#org_slugs[@]}) or slug: " choice <"$tty_input"
+      if ! read -r -p "Enter selection (1-${#org_slugs[@]}) or slug: " choice <"$tty_input"; then
+        echo "Multiple Fly orgs detected but no --org was provided." >&2
+        echo "Re-run with --org <slug> or set FLY_ORG." >&2
+        exit 1
+      fi
     else
       read -r -p "Enter selection (1-${#org_slugs[@]}) or slug: " choice
     fi
@@ -504,15 +529,20 @@ apply_tier() {
 
 prompt_tier() {
   local tty_input=""
-  if [ -t 0 ]; then
-    tty_input=""
-  elif [ -r /dev/tty ]; then
-    tty_input="/dev/tty"
-  else
+
+  default_tier_for_noninteractive() {
     SIZE_TIER="small"
     TIER_SET=true
     apply_tier "$SIZE_TIER"
-    echo "No TTY detected; defaulting instance tier to small."
+    echo "$1 defaulting instance tier to small."
+  }
+
+  if [ -t 0 ]; then
+    tty_input=""
+  elif tty_available; then
+    tty_input="/dev/tty"
+  else
+    default_tier_for_noninteractive "No TTY detected;"
     return
   fi
 
@@ -524,9 +554,15 @@ prompt_tier() {
   local choice=""
   while true; do
     if [ -n "$tty_input" ]; then
-      read -r -p "Enter selection (1-3) or name [small]: " choice <"$tty_input"
+      if ! read -r -p "Enter selection (1-3) or name [small]: " choice <"$tty_input"; then
+        default_tier_for_noninteractive "Unable to read from /dev/tty;"
+        return
+      fi
     else
-      read -r -p "Enter selection (1-3) or name [small]: " choice
+      if ! read -r -p "Enter selection (1-3) or name [small]: " choice; then
+        default_tier_for_noninteractive "Unable to read from stdin;"
+        return
+      fi
     fi
     choice="$(printf '%s' "$choice" | tr '[:upper:]' '[:lower:]')"
     if [ -z "$choice" ]; then
